@@ -4,6 +4,7 @@ use crate::elgamal::*;
 use elastic_elgamal::{group::ElementOps, Ciphertext, PublicKey, RingProof};
 use k256::{elliptic_curve::Field, ProjectivePoint, Scalar};
 use rand::{rngs::OsRng, seq::index, CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
 
 const N_PRICES: usize = 10; // K in many notations
 const WINNERS_M: usize = 1; // M (usually 1 for single-w inner example)
@@ -20,9 +21,12 @@ impl Default for AuctionParams {
     }
 }
 
+pub type EncBidVector = Vec<Ciphertext<K256Group>>; // length = K
+
+#[derive(Clone, Serialize, Deserialize)]
 /// A bidder’s unit-bid vector: encryptions of [0,...,0,1,0,...0]
 pub struct BidderVector {
-    pub enc_bits: Vec<Ciphertext<K256Group>>, // length = K
+    pub enc_bits: EncBidVector, // length = K
     pub enc_bits_proofs: Vec<RingProof<K256Group>>, // length = K
     pub blinding_scalars: Vec<Scalar>, // length = K
 }
@@ -51,7 +55,7 @@ pub fn make_onehot_bid<R: RngCore + CryptoRng>(
 /// Step 6 : Compute γij for a participant for all i, j 
 pub fn compute_partial_winning_vector(
     my_bid_vector : &BidderVector,
-    all_bids: &[BidderVector],
+    all_bids: &[EncBidVector],
     params: &AuctionParams,
     y_group : &PublicKey<K256Group>,
 ) -> (Vec<ProjectivePoint>, Vec<ProjectivePoint>) {
@@ -86,8 +90,8 @@ pub fn compute_partial_winning_vector(
         for h in 0..n_bidders {
            
             for d in j..vector_size {
-                acc_a = acc_a + all_bids[h].enc_bits[d].blinded_element();
-                acc_b = acc_b + all_bids[h].enc_bits[d].random_element();
+                acc_a = acc_a + all_bids[h][d].blinded_element();
+                acc_b = acc_b + all_bids[h][d].random_element();
             }
         }
 

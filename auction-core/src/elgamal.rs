@@ -1,4 +1,4 @@
-use elastic_elgamal::group::{ElementOps, Group as ElGroup, ScalarOps};
+use elastic_elgamal::{group::{ElementOps, Group as ElGroup, ScalarOps}, PublicKey};
 use k256::{
     elliptic_curve::{
         ff::PrimeField,
@@ -123,5 +123,12 @@ impl ElGroup for K256Group {
             .iter()
             .zip(s_vec.iter())
             .fold(ProjectivePoint::IDENTITY, |acc, (p, s)| acc + (*p * *s))
+    }
+}
+
+impl K256Group {
+    pub fn to_public_key(element: &ProjectivePoint) -> PublicKey<K256Group> {
+        let bytes = element.to_encoded_point(true).as_bytes().to_vec();
+        PublicKey::from_bytes(bytes.as_ref()).unwrap()
     }
 }
