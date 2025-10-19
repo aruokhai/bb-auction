@@ -1,5 +1,5 @@
 use core::num;
-use std::{collections::{BTreeMap, BTreeSet, HashSet}, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet, HashSet}, env, marker::PhantomData, sync::Arc};
 
 use elastic_elgamal::{group::{self, ElementOps}, Ciphertext, PublicKey};
 use k256::{
@@ -9,13 +9,12 @@ use k256::{
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::{self, Mutex}, task};
-use crate::{bidder, brandt::{compute_partial_winning_vector, make_onehot_bid, AuctionParams, EncBidVector}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, serde::projective_point};
+use crate::{bidder, brandt::{add_blinding_scalars, compute_partial_winning_vector, make_onehot_bid, partially_decrypt, AuctionParams, Delta, EncBidVector, Gamma, Phi}, channel::{self, create_envelope, BidChannel}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, serde::projective_point};
 
 use crate::{
     brandt::BidderVector,
-    broadcast::{
-        receive_envelope, send_envelope, EnvelopeReceiver, EnvelopeSender, MessageEnvelope,
-        SendEnvelopeError,
+    channel::{
+        MessageEnvelope,
     },
 };
 
@@ -34,17 +33,36 @@ pub struct BidAnnouncement {
     pub enc_bits_proofs: Vec<elastic_elgamal::RingProof<K256Group>>, // length = K
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PartailDecryptMessage {
+    #[serde(with = "projective_point")]
+    pub phi: Phi 
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BidCollationAnnoucement {
+    #[serde(with = "projective_point")]
+    pub public_key: ProjectivePoint,
+    #[serde(with = "projective_point::vec")]
+    pub blinded_gamma: Gamma,
+    #[serde(with = "projective_point::vec")]
+    pub blinded_delta: Delta
+}
+
 /// Represents a bidder participating in the auction protocol.
-pub struct Bidder {
+pub struct Bidder<Channel: BidChannel<K> + Clone, K: Copy> {
     secret_key: Scalar,
     public_key: ProjectivePoint,
     group_public_key: Arc<Mutex<PublicKey<K256Group>>>,
     bid_vector: Option<BidderVector>,
     bid_range: BidParams,
-    sender: EnvelopeSender,
+    bid_channel: Channel,
     bidders_keys: Arc<sync::RwLock<Vec<ProjectivePoint>>>,
-    bidders_bid_map: Arc<sync::RwLock<Vec<EncBidVector>>>,
+    bidders_bid_list: Arc<sync::RwLock<Vec<EncBidVector>>>,
     bid_state: Arc<Mutex<BidState>>,
+    blinded_gamma_list: Arc<sync::RwLock<Vec<Gamma>>>,
+    blinded_delta_list: Arc<sync::RwLock<Vec<Delta>>>,
+    seller_key: K,
 }
 
 #[derive(Clone, PartialEq, PartialOrd)]
@@ -54,6 +72,8 @@ pub enum BidState {
     DKGCompleted,
     BidSubmitted,
     BidsAcknowledged,
+    BidsCollated,
+    BidsPartiallyDecrypted,
     AuctionEnded,
 }
 
@@ -64,8 +84,9 @@ pub struct BidParams {
     pub winners_size: usize,
 }
 
-impl Bidder {
-    pub fn new<R: RngCore + CryptoRng>(rng: &mut R, sender: EnvelopeSender, bid_range: BidParams ) -> Self {
+
+impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
+    pub fn new<R: RngCore + CryptoRng>(rng: &mut R, bid_channel: Channel, bid_range: BidParams, seller_key: K ) -> Self {
         let secret_key = Scalar::random(rng);
         let public_key = ProjectivePoint::mul_by_generator(&secret_key);
         let group_public_key = K256Group::to_public_key(&ProjectivePoint::IDENTITY);
@@ -76,10 +97,13 @@ impl Bidder {
             group_public_key: Arc::new(Mutex::new(group_public_key)),
             bid_vector: None,
             bid_range,
-            sender,
+            bid_channel,
             bidders_keys: Arc::new(sync::RwLock::new(Vec::new())),
-            bidders_bid_map: Arc::new(sync::RwLock::new(Vec::new())),
+            bidders_bid_list: Arc::new(sync::RwLock::new(Vec::new())),
             bid_state: Arc::new(Mutex::new(BidState::NotStarted)),
+            blinded_gamma_list: Arc::new(sync::RwLock::new(Vec::new())),
+            blinded_delta_list: Arc::new(sync::RwLock::new(Vec::new())),
+            seller_key,
         }
     }
 
@@ -96,18 +120,23 @@ impl Bidder {
        
         task::spawn({
             let bidders_keys = self.bidders_keys.clone();
-            let bidders_bid_map = self.bidders_bid_map.clone();
+            let blinded_gamma_list = self.blinded_gamma_list.clone();
+            let blinded_delta_list = self.blinded_delta_list.clone();
+            let bidders_bid_map = self.bidders_bid_list.clone();
             let group_public_key = self.group_public_key.clone();
-            let mut inbox = self.sender.subscribe();
+            let cloned_channel = self.bid_channel.clone();
             let bid_state = self.bid_state.clone();
             let bid_vector = self.bid_vector.clone();
             let auction_params = AuctionParams {
                 n_prices: self.bid_range.step as usize,
                 m_winners: self.bid_range.winners_size,
             };
+            let bidder_pubkey = self.public_key.clone();
+            let secret_share= self.secret_key;
+            let seller_key= self.seller_key;
 
             async move {
-                while let Ok(msg) = inbox.recv().await {
+                while let Ok(msg) = cloned_channel.receive_broadcast_message().await {
                     if let Ok(dkg_announcement) = msg.decode::<DKGKeyAnnouncement>() {
                         let mut keys = bidders_keys.write().await;
                          if keys.len() >= num_bidders {
@@ -137,7 +166,6 @@ impl Bidder {
 
                         if bid_map.len() == num_bidders {
                             println!("All bidders' bids have been received.");
-                            *bid_state.lock().await = BidState::BidsAcknowledged;
 
                             let (gamma, delta) = compute_partial_winning_vector(
                                 &bid_vector.clone().unwrap(),
@@ -146,6 +174,57 @@ impl Bidder {
                                 &*group_public_key.lock().await,
                             ); 
 
+                            let (gamma_blinded, delta_blinded) = add_blinding_scalars(&bid_vector.clone().unwrap(), gamma, delta, &auction_params);
+
+                            blinded_gamma_list.write().await.push(gamma_blinded.clone());
+                            blinded_delta_list.write().await.push(delta_blinded.clone());
+
+                            let bid_collation_announcement = BidCollationAnnoucement {
+                                public_key: bidder_pubkey.clone(),
+                                blinded_gamma: gamma_blinded,
+                                blinded_delta: delta_blinded,
+                            };
+
+                            let envelope = create_envelope("BidCollationAnnouncement", bid_collation_announcement).unwrap();
+
+                            let res = cloned_channel.send_broadcast_message(&envelope).await;
+
+                            if !res.is_ok() {
+                                println!("Bid Collation Error")
+                            }
+
+                            *bid_state.lock().await = BidState::BidsCollated;
+
+                        }
+                    }
+
+                    if let Ok(bidCollationAnnouncement) = msg.decode::<BidCollationAnnoucement>() {
+                        let mut gamma_list = blinded_gamma_list.write().await; 
+                        if gamma_list.len() >= num_bidders {
+                            println!("All bidders' bid collation have been received.");
+                            continue;
+                        }
+
+                        gamma_list.push(bidCollationAnnouncement.blinded_gamma);
+                        let mut delta_list = blinded_delta_list.write(). await;
+                        delta_list.push(bidCollationAnnouncement.blinded_delta);
+
+                        if gamma_list.len() == num_bidders {
+                            let all_deltas = delta_list.as_array().unwrap();
+
+                            let phi = partially_decrypt(secret_share, all_deltas, &auction_params);
+
+                            let phi_message = PartailDecryptMessage {
+                                phi
+                            };
+
+                            let envelope = create_envelope("PhiMessage", phi_message).unwrap();
+
+                            let res = cloned_channel.send_direct_message(&envelope, seller_key).await;
+
+                            if !res.is_ok() {
+                                println!("Direct Message Error")
+                            }
                         }
                     }
                 }
@@ -172,7 +251,7 @@ impl Bidder {
         Ok(())
     }
 
-    pub fn publish_bid(&self) -> Result<(), AuctionError> {
+    pub async fn publish_bid(&self) -> Result<(), AuctionError> {
         if self.bid_vector.is_none() {
             return Err(AuctionError::BidNotSet);
         }
@@ -186,10 +265,11 @@ impl Bidder {
             enc_bits_proofs: self.bid_vector.as_ref().unwrap().enc_bits_proofs.clone(),
         };
 
-        self.publish("BidAnnouncement", bid_announcement)
-            .map_err(|_| AuctionError::BroadcastError)?;
+        let envelope = create_envelope("BidAnnouncement", bid_announcement).unwrap();
 
-        self.bidders_bid_map.blocking_write().push(self.bid_vector.as_ref().unwrap().enc_bits.clone());
+        self.bid_channel.send_broadcast_message(envelope).await.map_err(|err| AuctionError::BidPublishErr(err))?;
+
+        self.bidders_bid_list.blocking_write().push(self.bid_vector.as_ref().unwrap().enc_bits.clone());
 
         *self.bid_state.blocking_lock() = BidState::BidSubmitted;
 
@@ -208,29 +288,6 @@ impl Bidder {
         &self.secret_key
     }
 
-    /// Sends a labeled payload over the broadcast channel.
-    pub fn publish<L, T>(&self, label: L, payload: T) -> Result<(), SendEnvelopeError>
-    where
-        L: Into<String>,
-        T: Serialize,
-    {
-        send_envelope(&self.sender, label, payload)
-    }
-
-    /// Receives the next envelope addressed on the broadcast channel.
-    pub async fn receive_envelope(&mut self) -> Result<MessageEnvelope, tokio::sync::broadcast::error::RecvError> {
-        receive_envelope(&mut self.inbox).await
-    }
-
-    /// Returns a new independent subscription to the broadcast channel.
-    pub fn subscribe(&self) -> EnvelopeReceiver {
-        self.sender.subscribe()
-    }
-
-    /// Returns a stream of envelopes received on the broadcast channel.
-    pub fn stream(&self) -> tokio_stream::wrappers::BroadcastStream<MessageEnvelope> {
-        crate::broadcast::stream_envelopes(self.sender.subscribe())
-    }
 }
 
 

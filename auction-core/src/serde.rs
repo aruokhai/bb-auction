@@ -32,4 +32,29 @@ pub mod projective_point {
         let affine_point = AffinePoint::deserialize(deserializer)?;
         Ok(ProjectivePoint::from(affine_point))
     }
+
+    pub mod vec {
+        use k256::{AffinePoint, ProjectivePoint};
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    // Serialize Vec<ProjectivePoint> by converting each element to AffinePoint
+    // and delegating to AffinePoint's Serde implementation.
+    pub fn serialize<S>(points: &Vec<ProjectivePoint>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let affines = points.iter().map(|p| p.to_affine()).collect::<Vec<_>>();
+        affines.serialize(serializer)
+    }
+
+    // Deserialize Vec<ProjectivePoint> by reading a Vec<AffinePoint>
+    // and converting each element back to ProjectivePoint.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<ProjectivePoint>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let affines = Vec::<AffinePoint>::deserialize(deserializer)?;
+        Ok(affines.into_iter().map(ProjectivePoint::from).collect::<Vec<_>>())
+    }
+    }
 }

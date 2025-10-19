@@ -22,6 +22,9 @@ impl Default for AuctionParams {
 }
 
 pub type EncBidVector = Vec<Ciphertext<K256Group>>; // length = K
+pub type Gamma = Vec<ProjectivePoint>;
+pub type Delta = Vec<ProjectivePoint>;
+pub type Phi = Vec<ProjectivePoint>;
 
 #[derive(Clone, Serialize, Deserialize)]
 /// A bidder’s unit-bid vector: encryptions of [0,...,0,1,0,...0]
@@ -58,7 +61,7 @@ pub fn compute_partial_winning_vector(
     all_bids: &[EncBidVector],
     params: &AuctionParams,
     y_group : &PublicKey<K256Group>,
-) -> (Vec<ProjectivePoint>, Vec<ProjectivePoint>) {
+) -> (Gamma, Delta) {
     let n_bidders = all_bids.len();
 
     let mut gamma_vector = Vec::with_capacity(params.n_prices);
@@ -107,7 +110,7 @@ pub fn compute_partial_winning_vector(
 }
 
 // step 7
-pub fn add_blinding_scalars(my_bid_vector : &BidderVector, gamma: Vec<ProjectivePoint>, delta: Vec<ProjectivePoint>, params: &AuctionParams) -> (Vec<ProjectivePoint>, Vec<ProjectivePoint>) {
+pub fn add_blinding_scalars(my_bid_vector : &BidderVector, gamma: Gamma, delta: Delta, params: &AuctionParams) -> (Gamma, Delta) {
     let mut gamma_blinded = Vec::with_capacity(params.n_prices);
     let mut delta_blinded = Vec::with_capacity(params.n_prices);
 
@@ -124,7 +127,7 @@ pub fn add_blinding_scalars(my_bid_vector : &BidderVector, gamma: Vec<Projective
 
 // step 8 add partial secret keys to beta 
 // TODO: Add proofs
-pub fn patially_decrypt(secret_share: Scalar, all_delta: &[Vec<ProjectivePoint>], params: &AuctionParams) -> Vec<ProjectivePoint> {
+pub fn partially_decrypt(secret_share: Scalar, all_delta: &[Vec<ProjectivePoint>], params: &AuctionParams) -> Phi {
     let mut phi_v = Vec::with_capacity(params.n_prices);
 
     for j in 0..params.n_prices {
