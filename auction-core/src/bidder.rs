@@ -8,11 +8,11 @@ use k256::{
 };
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use tokio::{sync::{self, Mutex}, task};
-use crate::{bidder, brandt::{add_blinding_scalars, compute_partial_winning_vector, determine_winner, make_onehot_bid, partially_decrypt, AuctionParams, Delta, EncBidVector, Gamma, Phi}, channel::{self, create_envelope, BidChannel}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, seller::BidCollationFinalization, serde::projective_point};
+use tokio::{sync::{self, Mutex, RwLock}, task};
+use crate::{bidder, brandt::{AuctionParams, BidderShare, Delta, EncBidVector, Gamma, Phi, make_onehot_bid}, channel::{self, AuctionChannel, create_envelope}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, seller::BidCollationFinalization, serde::projective_point};
 
 use crate::{
-    brandt::BidderVector,
+    brandt::BidVector,
     channel::{
         MessageEnvelope,
     },
@@ -35,7 +35,7 @@ pub struct BidAnnouncement {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PartialDecryptMessage {
-    #[serde(with = "projective_point")]
+    #[serde(with = "projective_point::vec")]
     pub phi: Phi 
 }
 
@@ -53,19 +53,25 @@ pub struct BidCollationAnnoucement {
 
 
 /// Represents a bidder participating in the auction protocol.
-pub struct Bidder<Channel: BidChannel<K> + Clone, K: Copy> {
+pub struct Bidder<Channel: AuctionChannel<K> + Clone, K: Copy> {
     secret_key: Scalar,
     public_key: ProjectivePoint,
     group_public_key: Arc<Mutex<PublicKey<K256Group>>>,
-    bid_vector: Option<BidderVector>,
-    bid_range: BidParams,
-    bid_channel: Channel,
-    bidders_keys: Arc<sync::RwLock<Vec<ProjectivePoint>>>,
-    bidders_bid_list: Arc<sync::RwLock<Vec<EncBidVector>>>,
+
+    bid_vector: Option<BidVector>,
     bid_state: Arc<Mutex<BidState>>,
-    blinded_gamma_list: Arc<sync::RwLock<Vec<Gamma>>>,
-    blinded_delta_list: Arc<sync::RwLock<Vec<Delta>>>,
+
+    auction_params: AuctionParams,
+    auction_state: Arc<RwLock<AuctionState>>,
+
+    auction_channel: Channel,
     seller_key: K,
+}
+
+pub struct AuctionState {
+    bidders_keys: Vec<ProjectivePoint>,
+    bidders_bid_list: Vec<EncBidVector>,
+    blinded_biddershare: Vec<BidderShare>,
 }
 
 #[derive(Clone, PartialEq, PartialOrd)]
@@ -80,40 +86,38 @@ pub enum BidState {
     AuctionEnded,
 }
 
-pub struct BidParams {
-    pub min: u64,
-    pub max: u64,
-    pub step: u64,
-    pub winners_size: usize,
-}
 
 
-impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
-    pub fn new<R: RngCore + CryptoRng>(rng: &mut R, bid_channel: Channel, bid_range: BidParams, seller_key: K ) -> Self {
+impl<Channel: AuctionChannel<K> + Clone + Send + 'static, K: Copy + Send + 'static> Bidder<Channel, K> {
+    pub fn new<R: RngCore + CryptoRng>(rng: &mut R, auction_channel: Channel, auction_params: AuctionParams, seller_key: K ) -> Self {
         let secret_key = Scalar::random(rng);
         let public_key = ProjectivePoint::mul_by_generator(&secret_key);
         let group_public_key = K256Group::to_public_key(&ProjectivePoint::IDENTITY);
+
+        let auction_state = Arc::new(RwLock::new(AuctionState {
+            bidders_keys: Vec::new(),
+            bidders_bid_list: Vec::new(),
+            blinded_biddershare: Vec::new(),
+        }));
 
         Self {
             secret_key,
             public_key,
             group_public_key: Arc::new(Mutex::new(group_public_key)),
             bid_vector: None,
-            bid_range,
-            bid_channel,
-            bidders_keys: Arc::new(sync::RwLock::new(Vec::new())),
-            bidders_bid_list: Arc::new(sync::RwLock::new(Vec::new())),
             bid_state: Arc::new(Mutex::new(BidState::NotStarted)),
-            blinded_gamma_list: Arc::new(sync::RwLock::new(Vec::new())),
-            blinded_delta_list: Arc::new(sync::RwLock::new(Vec::new())),
+
+            auction_params,
+            auction_channel,
+           
+            
+            auction_state,
             seller_key,
         }
     }
 
-    pub fn initiate_dkg<R: RngCore + CryptoRng>(&mut self, rng: &mut R, num_bidders: usize) {
+    pub async fn initiate_dkg<R: RngCore + CryptoRng>(&mut self, rng: &mut R, num_bidders: usize) -> Result<(), AuctionError> {
         let proof_of_knowledge = SecretKeyProof::new(&self.secret_key, &self.public_key, rng);
-
-        self.bidders_keys.blocking_write().push(self.public_key);
 
         let dkg_message = DKGKeyAnnouncement {
             public_key: self.public_key,
@@ -122,12 +126,8 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
 
        
         task::spawn({
-            let bidders_keys = self.bidders_keys.clone();
-            let blinded_gamma_list = self.blinded_gamma_list.clone();
-            let blinded_delta_list = self.blinded_delta_list.clone();
-            let bidders_bid_map = self.bidders_bid_list.clone();
             let group_public_key = self.group_public_key.clone();
-            let cloned_channel = self.bid_channel.clone();
+            let cloned_channel = self.auction_channel.clone();
             let bid_state = self.bid_state.clone();
             let bid_vector = self.bid_vector.clone();
             let auction_params = AuctionParams {
@@ -137,6 +137,7 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
             let bidder_pubkey = self.public_key.clone();
             let secret_share= self.secret_key;
             let seller_key= self.seller_key;
+            
 
             async move {
                 while let Ok(msg) = cloned_channel.receive_broadcast_message().await {
@@ -170,10 +171,8 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
                         if bid_map.len() == num_bidders {
                             println!("All bidders' bids have been received.");
 
-                            let (gamma, delta) = compute_partial_winning_vector(
-                                &bid_vector.clone().unwrap(),
+                            let bidder_share= &bid_vector.clone().unwrap().compute_bidder_share(
                                 &bid_map.clone(),
-                                &auction_params,
                                 &*group_public_key.lock().await,
                             ); 
 
@@ -190,7 +189,7 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
 
                             let envelope = create_envelope("BidCollationAnnouncement", bid_collation_announcement).unwrap();
 
-                            let res = cloned_channel.send_broadcast_message(&envelope).await;
+                            let res = cloned_channel.send_broadcast_message(envelope).await;
 
                             if !res.is_ok() {
                                 println!("Bid Collation Error")
@@ -213,7 +212,7 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
                         delta_list.push(bid_collation_announcement.blinded_delta);
 
                         if gamma_list.len() == num_bidders {
-                            let all_deltas = delta_list.as_array().unwrap();
+                            let all_deltas = delta_list.as_slice();
 
                             let phi = partially_decrypt(secret_share, all_deltas, &auction_params);
 
@@ -223,7 +222,7 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
 
                             let envelope = create_envelope("PhiMessage", phi_message).unwrap();
 
-                            let res = cloned_channel.send_direct_message(&envelope, seller_key).await;
+                            let res = cloned_channel.send_direct_message(envelope, seller_key).await;
 
                             if !res.is_ok() {
                                 println!("Direct Message Error")
@@ -232,8 +231,8 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
                     }
 
                     if let Ok(bid_collation_finalization) =  msg.decode::<BidCollationFinalization>() {
-                        let mut gamma_list = blinded_gamma_list.read().await; 
-                        let is_winner = determine_winner(&bid_collation_finalization.collated_phi, gamma_list, &auction_params);
+                        let gamma_list = blinded_gamma_list.read().await; 
+                        let is_winner = is_winner(&bid_collation_finalization.collated_phi, &gamma_list, &auction_params);
 
                         if is_winner {
                             println!("I am a fucking winner")
@@ -245,10 +244,13 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
             }
         });
         
-        self.publish("DKGKeyAnnouncement", dkg_message)
-            .expect("failed to publish DKG key announcement");
+        let message_envelope  = create_envelope("DKGKeyAnnouncement", dkg_message).unwrap();
+
+        self.auction_channel.send_broadcast_message(message_envelope).await.map_err(|err| AuctionError::BroadcastError(err))?;
 
         *self.bid_state.blocking_lock() = BidState::DKGInProgress;
+
+        Ok(())
 
     }
 
@@ -281,7 +283,7 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
 
         let envelope = create_envelope("BidAnnouncement", bid_announcement).unwrap();
 
-        self.bid_channel.send_broadcast_message(envelope).await.map_err(|err| AuctionError::BidPublishErr(err))?;
+        self.auction_channel.send_broadcast_message(envelope).await.map_err(|err| AuctionError::BidPublishErr(err))?;
 
         self.bidders_bid_list.blocking_write().push(self.bid_vector.as_ref().unwrap().enc_bits.clone());
 
@@ -290,7 +292,7 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
         Ok(())
     }
 
-    pub fn bid_vector(&self) -> Option<&BidderVector> {
+    pub fn bid_vector(&self) -> Option<&BidVector> {
         self.bid_vector.as_ref()
     }
 

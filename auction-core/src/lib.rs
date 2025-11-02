@@ -6,3 +6,4 @@ pub mod serde;
 pub mod proof;
 pub mod error;
 pub mod seller;
+pub mod slot_index;

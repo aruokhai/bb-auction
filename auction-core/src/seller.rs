@@ -2,31 +2,31 @@ use core::sync;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use crate::{bidder::{self, BidParams, PartialDecryptMessage}, brandt::{add_blinding_scalars, compute_partial_winning_vector, determine_winner, make_onehot_bid, partially_decrypt, AuctionParams, Delta, EncBidVector, Gamma, Phi}, channel::{self, create_envelope, BidChannel}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, serde::projective_point};
+use crate::{bidder::{self, BidParams, PartialDecryptMessage}, brandt::{add_blinding_scalars, compute_partial_winning_vector, is_winner, make_onehot_bid, partially_decrypt, AuctionParams, Delta, EncBidVector, Gamma, Phi}, channel::{self, create_envelope, AuctionChannel}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, serde::projective_point};
 use tokio::sync::RwLock;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BidCollationFinalization {
-    #[serde(with = "projective_point")]
+    #[serde(with = "projective_point::vec")]
     pub collated_phi: Phi
 }
 
-pub struct Seller<Channel: BidChannel<K> + Clone, K: Copy> {
-    bid_range: Option<BidParams>,
-    bid_channel: Channel,
+pub struct Seller<Channel: AuctionChannel<K> + Clone, K: Copy> {
+    auction_params: AuctionParams,
+    auction_channel: Channel,
     phi_list: Arc<RwLock<Vec<Gamma>>>,
     channel_key: K,
 }
 
-impl<Channel: BidChannel<K> + Clone, K> Seller<Channel, K> {
+impl<Channel: AuctionChannel<K> + Clone, K: Copy> Seller<Channel, K> {
     pub fn new(
-        bid_range: BidParams,
+        bid_params: BidParams,
         bid_channel: Channel,
         channel_key: K,
     ) -> Self {
         Self {
-            bid_range,
-            bid_channel,
+            bid_params,
+            auction_channel: bid_channel,
             phi_list: Arc::new(RwLock::new(Vec::new())),
             channel_key,
         }
@@ -36,7 +36,7 @@ impl<Channel: BidChannel<K> + Clone, K> Seller<Channel, K> {
         &self,
         auction_params: AuctionParams,
     ) -> Result<(), AuctionError> {
-        let bid_channel = self.bid_channel.clone();
+        let bid_channel = self.auction_channel.clone();
         let phi_list = self.phi_list.clone();
         let channel_key = self.channel_key;
 

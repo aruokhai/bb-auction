@@ -4,7 +4,7 @@ pub enum AuctionError {
     DkgNotCompleted,
     BidNotSet,
     BidPublishErr(BidChannelErorr),
-    BroadcastError,
+    BroadcastError(BidChannelErorr),
     InvalidBidIndex,
     BidVectorNotSet,
     SerializationError,

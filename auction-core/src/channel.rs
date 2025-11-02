@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -53,30 +54,30 @@ impl MessageEnvelope {
 // /// Receiver used to subscribe to envelopes from the broadcast channel.
 // pub type EnvelopeReceiver = broadcast::Receiver<MessageEnvelope>;
 
-// /// Error returned when sending an envelope fails.
-// #[derive(Debug)]
-// pub enum SendEnvelopeError {
-//     Serialize(serde_json::Error),
-//     Disconnected,
-// }
+/// Error returned when sending an envelope fails.
+#[derive(Debug)]
+pub enum SendEnvelopeError {
+    Serialize(serde_json::Error),
+    Disconnected,
+}
 
-// impl std::fmt::Display for SendEnvelopeError {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             SendEnvelopeError::Serialize(err) => write!(f, "failed to serialize payload: {err}"),
-//             SendEnvelopeError::Disconnected => write!(f, "no active receivers on channel"),
-//         }
-//     }
-// }
+impl std::fmt::Display for SendEnvelopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendEnvelopeError::Serialize(err) => write!(f, "failed to serialize payload: {err}"),
+            SendEnvelopeError::Disconnected => write!(f, "no active receivers on channel"),
+        }
+    }
+}
 
-// impl std::error::Error for SendEnvelopeError {
-//     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-//         match self {
-//             SendEnvelopeError::Serialize(err) => Some(err),
-//             SendEnvelopeError::Disconnected => None,
-//         }
-//     }
-// }
+impl std::error::Error for SendEnvelopeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SendEnvelopeError::Serialize(err) => Some(err),
+            SendEnvelopeError::Disconnected => None,
+        }
+    }
+}
 
 // /// Convenience constructor for creating a broadcast channel that carries message envelopes.
 // pub fn broadcast_channel(capacity: usize) -> (EnvelopeSender, EnvelopeReceiver) {
@@ -87,7 +88,8 @@ impl MessageEnvelope {
 
 // }
 
-pub trait BidChannel<K> {
+#[async_trait]
+pub trait AuctionChannel<K> {
     async fn send_broadcast_message(&self, msg: MessageEnvelope) -> Result<(), BidChannelErorr>;
     async fn send_direct_message(&self, msg: MessageEnvelope, receiver_id: K) -> Result<(), BidChannelErorr>;
     async fn receive_direct_message(&self, msg: MessageEnvelope) -> Result<MessageEnvelope, BidChannelErorr>;
@@ -119,7 +121,7 @@ where
 //     receiver.recv().await
 // }
 
-/// Converts a broadcast receiver into an asynchronous stream of envelopes.
+// Converts a broadcast receiver into an asynchronous stream of envelopes.
 // pub fn stream_envelopes(receiver: EnvelopeReceiver) -> BroadcastStream<MessageEnvelope> {
 //     BroadcastStream::new(receiver)
 // }

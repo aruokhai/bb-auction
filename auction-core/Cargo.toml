@@ -15,3 +15,5 @@ tokio = { version = "1.38" , features = [
 ] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 sha2 = "0.10"
+async-trait = "0.1"
+num-traits = "0.2"
