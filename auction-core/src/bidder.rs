@@ -9,7 +9,7 @@ use k256::{
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::{self, Mutex}, task};
-use crate::{bidder, brandt::{add_blinding_scalars, compute_partial_winning_vector, make_onehot_bid, partially_decrypt, AuctionParams, Delta, EncBidVector, Gamma, Phi}, channel::{self, create_envelope, BidChannel}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, serde::projective_point};
+use crate::{bidder, brandt::{add_blinding_scalars, compute_partial_winning_vector, determine_winner, make_onehot_bid, partially_decrypt, AuctionParams, Delta, EncBidVector, Gamma, Phi}, channel::{self, create_envelope, BidChannel}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, seller::BidCollationFinalization, serde::projective_point};
 
 use crate::{
     brandt::BidderVector,
@@ -34,7 +34,7 @@ pub struct BidAnnouncement {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct PartailDecryptMessage {
+pub struct PartialDecryptMessage {
     #[serde(with = "projective_point")]
     pub phi: Phi 
 }
@@ -48,6 +48,9 @@ pub struct BidCollationAnnoucement {
     #[serde(with = "projective_point::vec")]
     pub blinded_delta: Delta
 }
+
+
+
 
 /// Represents a bidder participating in the auction protocol.
 pub struct Bidder<Channel: BidChannel<K> + Clone, K: Copy> {
@@ -198,23 +201,23 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
                         }
                     }
 
-                    if let Ok(bidCollationAnnouncement) = msg.decode::<BidCollationAnnoucement>() {
+                    if let Ok(bid_collation_announcement) = msg.decode::<BidCollationAnnoucement>() {
                         let mut gamma_list = blinded_gamma_list.write().await; 
                         if gamma_list.len() >= num_bidders {
                             println!("All bidders' bid collation have been received.");
                             continue;
                         }
 
-                        gamma_list.push(bidCollationAnnouncement.blinded_gamma);
+                        gamma_list.push(bid_collation_announcement.blinded_gamma);
                         let mut delta_list = blinded_delta_list.write(). await;
-                        delta_list.push(bidCollationAnnouncement.blinded_delta);
+                        delta_list.push(bid_collation_announcement.blinded_delta);
 
                         if gamma_list.len() == num_bidders {
                             let all_deltas = delta_list.as_array().unwrap();
 
                             let phi = partially_decrypt(secret_share, all_deltas, &auction_params);
 
-                            let phi_message = PartailDecryptMessage {
+                            let phi_message = PartialDecryptMessage {
                                 phi
                             };
 
@@ -227,6 +230,17 @@ impl<Channel: BidChannel<K> + Clone, K> Bidder<Channel, K> {
                             }
                         }
                     }
+
+                    if let Ok(bid_collation_finalization) =  msg.decode::<BidCollationFinalization>() {
+                        let mut gamma_list = blinded_gamma_list.read().await; 
+                        let is_winner = determine_winner(&bid_collation_finalization.collated_phi, gamma_list, &auction_params);
+
+                        if is_winner {
+                            println!("I am a fucking winner")
+                        }
+                    }
+
+
                 }
             }
         });

@@ -5,3 +5,4 @@ pub mod channel;
 pub mod serde;
 pub mod proof;
 pub mod error;
+pub mod seller;

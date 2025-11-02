@@ -144,7 +144,7 @@ pub fn partially_decrypt(secret_share: Scalar, all_delta: &[Vec<ProjectivePoint>
 
 // step 9 and 10, final decryption and winner determination
 pub fn determine_winner(
-    phi_list: &[Vec<ProjectivePoint>],
+    phi_list: &[ProjectivePoint],
     gamma_all: &[Vec<ProjectivePoint>],
     params: &AuctionParams,
 ) -> bool {
@@ -154,12 +154,10 @@ pub fn determine_winner(
 
     for j in 0..params.n_prices {
         let mut acc_gamma = K256Group::identity();
-        let mut acc_phi = K256Group::identity();
         for h in 0..n_bidders {
             acc_gamma = &acc_gamma + &gamma_all[h][j];
-            acc_phi = &acc_phi + &phi_list[h][j];
         }
-        let final_decryption = &acc_gamma - &acc_phi;
+        let final_decryption = &acc_gamma - &phi_list[j];
     
         winning_vector.push(final_decryption);
 
