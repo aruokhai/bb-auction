@@ -89,14 +89,15 @@ impl std::error::Error for SendEnvelopeError {
 // }
 
 #[async_trait]
-pub trait AuctionChannel<K> {
-    async fn send_broadcast_message(&self, msg: MessageEnvelope) -> Result<(), BidChannelErorr>;
-    async fn send_direct_message(&self, msg: MessageEnvelope, receiver_id: K) -> Result<(), BidChannelErorr>;
-    async fn receive_direct_message(&self, msg: MessageEnvelope) -> Result<MessageEnvelope, BidChannelErorr>;
-    async fn receive_broadcast_message(&self) -> Result<MessageEnvelope, BidChannelErorr>;
+pub trait AuctionChannel {
+
+    async fn send_broadcast_message(&self, msg: MessageEnvelope) -> Result<(), AuctionChannelErorr>;
+    async fn send_direct_message(&self, msg: MessageEnvelope) -> Result<(), AuctionChannelErorr>;
+    async fn receive_direct_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr>;
+    async fn receive_broadcast_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr>;
 }
 
-pub enum BidChannelErorr {
+pub enum AuctionChannelErorr {
     FailedToSend(String),
     FailedToReceive(String)
 }

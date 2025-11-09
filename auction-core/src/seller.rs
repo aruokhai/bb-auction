@@ -2,13 +2,13 @@ use core::sync;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use crate::{bidder::{self, BidParams, PartialDecryptMessage}, brandt::{add_blinding_scalars, compute_partial_winning_vector, is_winner, make_onehot_bid, partially_decrypt, AuctionParams, Delta, EncBidVector, Gamma, Phi}, channel::{self, create_envelope, AuctionChannel}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, serde::projective_point};
+use crate::{bidder::{self, BidParams, BidPartialMessage}, brandt::{add_blinding_scalars, compute_partial_winning_vector, is_winner, make_onehot_bid, partially_decrypt, AuctionParams, Delta, EncBidVector, Gamma, Phi}, channel::{self, create_envelope, AuctionChannel}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, serde::projective_point};
 use tokio::sync::RwLock;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BidCollationFinalization {
-    #[serde(with = "projective_point::vec")]
-    pub collated_phi: Phi
+    #[serde(with = "projective_point::vec_vec")]
+    pub collated_phi: Vec<Phi>
 }
 
 pub struct Seller<Channel: AuctionChannel<K> + Clone, K: Copy> {
@@ -44,7 +44,7 @@ impl<Channel: AuctionChannel<K> + Clone, K: Copy> Seller<Channel, K> {
             let mut receiver = bid_channel.subscribe(channel_key).await;
 
             while let Some(message) = receiver.recv().await {
-                match message.decode::<PartialDecryptMessage>() {
+                match message.decode::<BidPartialMessage>() {
                     Ok(phi) => {
                         let mut phi_list_lock = phi_list.write().await;
                         phi_list_lock.push(phi);

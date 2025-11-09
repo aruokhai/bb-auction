@@ -10,17 +10,18 @@ use serde::{Deserialize, Serialize};
 const N_PRICES: u64 = 10; // K in many notations
 const WINNERS_M: u64 = 1; // M (usually 1 for single-w inner example)
 
-/// Auction parameters
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuctionParams {
     pub k: u64, // K in many notations
     pub min: u64,
     pub max: u64,
     pub m: u64, // M (usually 1 for single-winner example)
+    pub num_bidders: u64,
 }
 
 impl Default for AuctionParams {
     fn default() -> Self {
-        Self { k: N_PRICES, m: WINNERS_M, min: 0, max: 100}
+        Self { k: N_PRICES, m: WINNERS_M, min: 0, max: 100, num_bidders: 2  }
     }
 }
 
@@ -29,8 +30,11 @@ pub type Gamma = Vec<ProjectivePoint>;
 pub type Delta = Vec<ProjectivePoint>;
 pub type Phi = Vec<ProjectivePoint>;
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct  BidderShare {
+    #[serde(with = "projective_point::vec")]
     pub gamma : Gamma,
+    #[serde(with = "projective_point::vec")]
     pub delta : Delta,
 }
 
@@ -155,21 +159,24 @@ impl BidVector {
 
     // step 9 and 10, final decryption and winner determination
     pub fn is_winner(&self, 
-        phi_list: &[ProjectivePoint],
+        phi_list: &[Phi],
         gamma_all: &[Vec<ProjectivePoint>],
     ) -> bool {
+
         let n_bidders = phi_list.len();
         let mut winning_vector = vec![K256Group::identity(); self.vector_size];
 
         for j in 0..self.vector_size {
             let mut acc_gamma = K256Group::identity();
+            let mut acc_phi = K256Group::identity();
+           
             for h in 0..n_bidders {
                 acc_gamma = &acc_gamma + &gamma_all[h][j];
+                acc_phi = &acc_phi + &phi_list[h][j];
             }
-            let final_decryption = &acc_gamma - &phi_list[j];
+            let final_decryption = &acc_gamma - &acc_phi;
         
             winning_vector.push(final_decryption);
-
         }
 
         for j in 0..self.vector_size {

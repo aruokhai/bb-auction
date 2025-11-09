@@ -1,10 +1,10 @@
-use crate::channel::BidChannelErorr;
+use crate::channel::AuctionChannelErorr;
 
 pub enum AuctionError {
     DkgNotCompleted,
     BidNotSet,
-    BidPublishErr(BidChannelErorr),
-    BroadcastError(BidChannelErorr),
+    BidPublishErr(AuctionChannelErorr),
+    BroadcastError(AuctionChannelErorr),
     InvalidBidIndex,
     BidVectorNotSet,
     SerializationError,
