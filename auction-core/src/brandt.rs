@@ -190,7 +190,7 @@ impl BidVector {
             }
             let final_decryption = &acc_gamma - &acc_phi;
 
-            winning_vector.push(final_decryption);
+            winning_vector[j] = final_decryption;
         }
 
         for j in 0..self.vector_size {
@@ -207,17 +207,23 @@ pub fn find_bid_index(bid_amount: u64, auction_params: &AuctionParams) -> Option
     let min = auction_params.min;
     let slot_width = auction_params.k;
     let max = auction_params.max;
-    let amount = bid_amount;
-    if slot_width <= 0 {
+
+    if slot_width == 0 {
         return None;
     }
-    if amount < min {
+    if bid_amount < min || bid_amount > max {
         return None;
     }
-    if amount > max {
-        return None;
-    }
-    let diff = amount - min;
+
+    // total number of slots (inclusive range)
+    let total_slots = ((max - min) / slot_width) as usize + 1;
+
+    // reverse index: high bids map to low indices
+    let diff = max - bid_amount;
     let idx = (diff / slot_width) as usize;
+
+    if idx >= total_slots {
+        return None;
+    }
     Some(idx)
 }

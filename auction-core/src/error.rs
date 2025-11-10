@@ -1,5 +1,6 @@
 use crate::channel::AuctionChannelErorr;
 
+#[derive(Debug)]
 pub enum AuctionError {
     DkgNotCompleted,
     BidNotSet,

@@ -106,7 +106,7 @@ impl<Channel: AuctionChannel + Clone + Send + 'static> Bidder<Channel> {
         let public_key = ProjectivePoint::mul_by_generator(&secret_key);
 
         let bid_state = Arc::new(Mutex::new(BidState {
-            group_public_key: K256Group::to_public_key(&ProjectivePoint::IDENTITY),
+            group_public_key: K256Group::to_public_key(&ProjectivePoint::GENERATOR),
             bid_vector: None,
             bid_status: BidStatus::NotStarted,
             bid_amount: 0,
@@ -370,11 +370,12 @@ pub async fn run_loop<
             };
             let gamma_list: Vec<Vec<ProjectivePoint>> = blinded_bidder_share_list
                 .iter()
-                .map(|sh| sh.delta.clone())
+                .map(|sh| sh.gamma.clone())
                 .collect::<Vec<_>>();
             let phi_list = bid_collation_finalization.collated_phi;
             let is_winner = bid_vector.is_winner(&phi_list, &gamma_list);
 
+            println!("am i a winner {}", is_winner);
             let _ = events_tx.send(BidderEvent::IsWinner(is_winner));
         }
     }

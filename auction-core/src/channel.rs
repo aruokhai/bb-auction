@@ -2,9 +2,6 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::broadcast;
-use tokio::task::coop::RestoreOnPending;
-use tokio_stream::wrappers::BroadcastStream;
 
 /// Envelope that wraps a labeled payload serialized with Serde.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,6 +94,7 @@ pub trait AuctionChannel {
     async fn receive_broadcast_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr>;
 }
 
+#[derive(Debug)]
 pub enum AuctionChannelErorr {
     FailedToSend(String),
     FailedToReceive(String),
@@ -133,3 +131,84 @@ where
 // pub fn stream_envelopes(receiver: EnvelopeReceiver) -> BroadcastStream<MessageEnvelope> {
 //     BroadcastStream::new(receiver)
 // }
+
+#[cfg(test)]
+pub mod test_utils {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, broadcast, mpsc};
+
+    struct InMemoryAuctionChannelInner {
+        broadcast_tx: broadcast::Sender<MessageEnvelope>,
+        direct_tx: mpsc::UnboundedSender<MessageEnvelope>,
+        direct_rx: Mutex<mpsc::UnboundedReceiver<MessageEnvelope>>,
+    }
+
+    pub struct InMemoryAuctionChannel {
+        inner: Arc<InMemoryAuctionChannelInner>,
+        broadcast_rx: Mutex<broadcast::Receiver<MessageEnvelope>>,
+    }
+
+    impl InMemoryAuctionChannel {
+        pub fn new() -> Self {
+            let (broadcast_tx, broadcast_rx) = broadcast::channel(64);
+            let (direct_tx, direct_rx) = mpsc::unbounded_channel();
+
+            Self {
+                inner: Arc::new(InMemoryAuctionChannelInner {
+                    broadcast_tx,
+                    direct_tx,
+                    direct_rx: Mutex::new(direct_rx),
+                }),
+                broadcast_rx: Mutex::new(broadcast_rx),
+            }
+        }
+    }
+
+    impl Clone for InMemoryAuctionChannel {
+        fn clone(&self) -> Self {
+            Self {
+                inner: Arc::clone(&self.inner),
+                broadcast_rx: Mutex::new(self.inner.broadcast_tx.subscribe()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AuctionChannel for InMemoryAuctionChannel {
+        async fn send_broadcast_message(
+            &self,
+            msg: MessageEnvelope,
+        ) -> Result<(), AuctionChannelErorr> {
+            self.inner
+                .broadcast_tx
+                .send(msg)
+                .map(|_| ())
+                .map_err(|err| AuctionChannelErorr::FailedToSend(err.to_string()))
+        }
+
+        async fn send_direct_message(
+            &self,
+            msg: MessageEnvelope,
+        ) -> Result<(), AuctionChannelErorr> {
+            self.inner
+                .direct_tx
+                .send(msg)
+                .map_err(|err| AuctionChannelErorr::FailedToSend(err.to_string()))
+        }
+
+        async fn receive_direct_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr> {
+            let mut rx = self.inner.direct_rx.lock().await;
+            rx.recv()
+                .await
+                .ok_or_else(|| AuctionChannelErorr::FailedToReceive("direct channel closed".into()))
+        }
+
+        async fn receive_broadcast_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr> {
+            let mut rx = self.broadcast_rx.lock().await;
+            rx.recv()
+                .await
+                .map_err(|err| AuctionChannelErorr::FailedToReceive(err.to_string()))
+        }
+    }
+}
