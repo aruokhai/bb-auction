@@ -1,12 +1,15 @@
-use elastic_elgamal::{group::{ElementOps, Group as ElGroup, ScalarOps}, PublicKey};
+use elastic_elgamal::{
+    PublicKey,
+    group::{ElementOps, Group as ElGroup, ScalarOps},
+};
 use k256::{
+    EncodedPoint, ProjectivePoint, Scalar,
     elliptic_curve::{
+        Field,
         ff::PrimeField,
         group::Group as _,
         sec1::{FromEncodedPoint, ToEncodedPoint},
-        Field,
     },
-    EncodedPoint, ProjectivePoint, Scalar,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -101,9 +104,9 @@ impl ElGroup for K256Group {
 
     #[inline]
     fn vartime_double_mul_generator(
-        k: &Self::Scalar,        // scalar for G
+        k: &Self::Scalar,         // scalar for G
         k_element: Self::Element, // point P
-        r: &Self::Scalar,        // scalar for P
+        r: &Self::Scalar,         // scalar for P
     ) -> Self::Element {
         // Compute k·G + r·P
         (ProjectivePoint::GENERATOR * *k) + (k_element * *r)

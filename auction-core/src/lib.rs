@@ -1,8 +1,8 @@
-pub mod brandt;
-pub mod elgamal;
 pub mod bidder;
+pub mod brandt;
 pub mod channel;
-pub mod serde;
-pub mod proof;
+pub mod elgamal;
 pub mod error;
+pub mod proof;
 pub mod seller;
+pub mod serde;

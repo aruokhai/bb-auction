@@ -90,8 +90,8 @@ impl std::error::Error for SendEnvelopeError {
 
 #[async_trait]
 pub trait AuctionChannel {
-
-    async fn send_broadcast_message(&self, msg: MessageEnvelope) -> Result<(), AuctionChannelErorr>;
+    async fn send_broadcast_message(&self, msg: MessageEnvelope)
+    -> Result<(), AuctionChannelErorr>;
     async fn send_direct_message(&self, msg: MessageEnvelope) -> Result<(), AuctionChannelErorr>;
     async fn receive_direct_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr>;
     async fn receive_broadcast_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr>;
@@ -99,20 +99,27 @@ pub trait AuctionChannel {
 
 pub enum AuctionChannelErorr {
     FailedToSend(String),
-    FailedToReceive(String)
+    FailedToReceive(String),
 }
 
-pub fn create_envelope<L, T>(
-    label: L,
-    payload: T,
-) -> Result<MessageEnvelope, SendEnvelopeError>
+impl std::fmt::Display for AuctionChannelErorr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuctionChannelErorr::FailedToSend(err) => write!(f, "failed to send message: {err}"),
+            AuctionChannelErorr::FailedToReceive(err) => {
+                write!(f, "failed to receive message: {err}")
+            }
+        }
+    }
+}
+
+pub fn create_envelope<L, T>(label: L, payload: T) -> Result<MessageEnvelope, SendEnvelopeError>
 where
     L: Into<String>,
     T: Serialize,
 {
-    let envelope =
-        MessageEnvelope::new(label, payload).map_err(SendEnvelopeError::Serialize);
-    return envelope
+    let envelope = MessageEnvelope::new(label, payload).map_err(SendEnvelopeError::Serialize);
+    return envelope;
 }
 
 // /// Receives the next envelope from the provided receiver.

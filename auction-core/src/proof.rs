@@ -1,10 +1,13 @@
-use k256::{elliptic_curve::{ops::MulByGenerator, Field, PrimeField}, ProjectivePoint, Scalar};
-use rand::{CryptoRng, RngCore};
-use k256::elliptic_curve::sec1::ToEncodedPoint;
-use serde::{Deserialize, Serialize};
 use crate::serde::projective_point;
-use sha2::Sha256;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::{
+    ProjectivePoint, Scalar,
+    elliptic_curve::{Field, PrimeField, ops::MulByGenerator},
+};
+use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use sha2::Sha256;
 
 #[derive(Clone, Serialize, Deserialize)]
 
@@ -24,14 +27,14 @@ impl SecretKeyProof {
         let commitment = ProjectivePoint::mul_by_generator(&nonce);
         let challenge = compute_challenge(&commitment, public_key);
         let response = nonce + (challenge * secret_key);
- 
+
         Self {
             commitment,
             response,
         }
     }
 }
- 
+
 fn compute_challenge(commitment: &ProjectivePoint, public_key: &ProjectivePoint) -> Scalar {
     let commitment_bytes = commitment
         .to_affine()
