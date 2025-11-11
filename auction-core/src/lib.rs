@@ -23,7 +23,7 @@ mod tests {
         let auction_params = AuctionParams {
             k: 10,
             min: 0,
-            max: 100,
+            max: 90,
             m: 1,
             num_bidders: 10,
         };

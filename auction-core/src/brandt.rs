@@ -3,7 +3,7 @@ use std::cmp;
 use crate::elgamal::*;
 use crate::serde::projective_point;
 use elastic_elgamal::{Ciphertext, PublicKey, RingProof, group::ElementOps};
-use k256::{ProjectivePoint, Scalar, elliptic_curve::Field};
+use k256::{ProjectivePoint, Scalar, elliptic_curve::{Field, Group, PrimeField}};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +51,6 @@ pub struct BidVector {
     #[serde(with = "projective_point")]
     pub public_key: ProjectivePoint,
     pub enc_bits: EncBidVector,                     // length = K
-    pub enc_bits_proofs: Vec<RingProof<K256Group>>, // length = K
     pub blinding_scalars: Vec<Scalar>,              // length = K
     pub vector_size: usize,
     pub winner_size: usize,
@@ -67,19 +66,19 @@ pub fn make_onehot_bid<R: RngCore + CryptoRng>(
     bid_amount: u64,
 ) -> BidVector {
     let vector_size = auction_params.k as usize;
+    let marker_projective = ProjectivePoint::GENERATOR * Scalar::from_u128(1024);
     let mut ciphertext_v = Vec::with_capacity(vector_size);
-    let mut ring_proof_v = Vec::with_capacity(vector_size);
     let mut blinding_scalars = Vec::with_capacity(vector_size);
-    let bid_index = find_bid_index(bid_amount, auction_params).expect("Bid amount out of range");
+    let bid_index = find_bid_index(bid_amount, auction_params).expect(format!("Bid amount out of range {}", bid_amount).as_str());
 
+    println!("Bid amount {} mapped to index {}", bid_amount, bid_index);
     for j in 0..vector_size {
-        let (cipher_text, ring_proof) = if j == bid_index {
-            group_pk.encrypt_bool(true, &mut rng)
+        let cipher_text = if j == bid_index {
+            group_pk.encrypt_element(marker_projective, &mut rng)
         } else {
-            group_pk.encrypt_bool(false, &mut rng)
+            group_pk.encrypt_element(ProjectivePoint::IDENTITY, &mut rng)
         };
         ciphertext_v.push(cipher_text);
-        ring_proof_v.push(ring_proof);
 
         blinding_scalars.push(Scalar::random(&mut rng));
     }
@@ -87,7 +86,6 @@ pub fn make_onehot_bid<R: RngCore + CryptoRng>(
         secret_key: secret_key,
         public_key: public_key,
         enc_bits: ciphertext_v,
-        enc_bits_proofs: ring_proof_v,
         blinding_scalars,
         vector_size: vector_size,
         winner_size: auction_params.m as usize,
@@ -99,7 +97,6 @@ impl BidVector {
     pub fn compute_bidder_share(
         &self,
         all_bids: &[EncBidVector],
-        y_group: &PublicKey<K256Group>,
     ) -> BidderShare {
         let n_bidders = all_bids.len();
 
@@ -107,35 +104,44 @@ impl BidVector {
         let mut delta_vector = Vec::with_capacity(self.vector_size);
 
         let two_m_plus_two = Scalar::from((2 * self.winner_size + 2) as u64);
-        let two_m_minus_one = Scalar::from((2 * self.winner_size - 1) as u64);
+        let two_m_plus_one = Scalar::from((2 * self.winner_size + 1) as u64);
 
-        let mut bid_vector_alpha_blinder = K256Group::identity();
-        let mut bid_vector_beta_blinder = K256Group::identity();
 
-        for d in 0..self.vector_size {
-            bid_vector_alpha_blinder =
-                bid_vector_alpha_blinder + self.enc_bits[d].blinded_element();
-            bid_vector_beta_blinder = bid_vector_beta_blinder + self.enc_bits[d].random_element();
-        }
-
-        bid_vector_alpha_blinder = &bid_vector_alpha_blinder * &two_m_plus_two;
-        bid_vector_beta_blinder = &bid_vector_beta_blinder * &two_m_plus_two;
-
-        let bid_vector_finder = y_group.as_element() * &two_m_minus_one;
+        let marker_projective = ProjectivePoint::GENERATOR * Scalar::from_u128(1024);
+        let bid_vector_finder = marker_projective * two_m_plus_one;
 
         for j in 0..self.vector_size {
             let mut acc_a = K256Group::identity();
             let mut acc_b = K256Group::identity();
 
+            let mut bid_vector_alpha_blinder = K256Group::identity();
+            let mut bid_vector_beta_blinder = K256Group::identity();
+
+            for d in 0..=j {
+                bid_vector_alpha_blinder =
+                    bid_vector_alpha_blinder + self.enc_bits[d].blinded_element();
+                bid_vector_beta_blinder = bid_vector_beta_blinder + self.enc_bits[d].random_element();
+            }
+
+            bid_vector_alpha_blinder = bid_vector_alpha_blinder * two_m_plus_two;
+            bid_vector_beta_blinder = bid_vector_beta_blinder * two_m_plus_two;
+
             for h in 0..n_bidders {
                 for d in j..self.vector_size {
-                    acc_a = acc_a + all_bids[h][d].blinded_element();
-                    acc_b = acc_b + all_bids[h][d].random_element();
+                    let d_plus_1 = all_bids[h].get(d + 1);
+                    if let Some(dp1) = d_plus_1 {
+                         acc_a = acc_a + all_bids[h][d].blinded_element() + dp1.blinded_element();
+                        acc_b = acc_b + all_bids[h][d].random_element() + dp1.random_element();
+                    } else {
+                        acc_a = acc_a + all_bids[h][d].blinded_element();
+                        acc_b = acc_b + all_bids[h][d].random_element();
+                    }
+               
                 }
             }
 
-            acc_a = (&acc_a + &bid_vector_alpha_blinder) - &bid_vector_finder;
-            acc_b = &acc_b + &bid_vector_beta_blinder;
+            acc_a = (acc_a + bid_vector_alpha_blinder) - bid_vector_finder;
+            acc_b = acc_b + bid_vector_beta_blinder;
 
             gamma_vector.push(acc_a);
             delta_vector.push(acc_b);
@@ -160,16 +166,16 @@ impl BidVector {
 
     // step 8 add partial secret keys to beta
     // TODO: Add proofs
-    pub fn derive_phi(&self, all_delta: &[Vec<ProjectivePoint>]) -> Phi {
+    pub fn derive_phi(&self, all_blinded_delta: &[Vec<ProjectivePoint>]) -> Phi {
         let mut phi_v = Vec::with_capacity(self.vector_size);
 
         for j in 0..self.vector_size {
             let mut phi = K256Group::identity();
-            for h in 0..all_delta.len() {
-                phi = phi + (all_delta[h][j].clone() * self.secret_key);
+            for h in 0..all_blinded_delta.len() {
+                phi = phi + (all_blinded_delta[h][j].clone());
             }
 
-            phi_v.push(phi);
+            phi_v.push(phi  * self.secret_key);
         }
 
         phi_v
@@ -216,13 +222,13 @@ pub fn find_bid_index(bid_amount: u64, auction_params: &AuctionParams) -> Option
     }
 
     // total number of slots (inclusive range)
-    let total_slots = ((max - min) / slot_width) as usize + 1;
+    let total_slots = ((max - min) / slot_width) as usize  + 1;
 
     // reverse index: high bids map to low indices
     let diff = max - bid_amount;
     let idx = (diff / slot_width) as usize;
-
     if idx >= total_slots {
+       
         return None;
     }
     Some(idx)

@@ -33,7 +33,6 @@ pub struct BidVectorAnnouncement {
     #[serde(with = "projective_point")]
     pub public_key: ProjectivePoint,
     pub enc_bits: EncBidVector, // length = K
-    pub enc_bits_proofs: Vec<elastic_elgamal::RingProof<K256Group>>, // length = K
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -222,11 +221,12 @@ pub async fn run_loop<
     events_tx: BidderEventSender,
 ) {
     let auction_state = Arc::new(RwLock::new(AuctionState {
-        bidders_keys: Vec::new(),
+        bidders_keys: vec![public_key.clone()],
         bidders_bid_list: Vec::new(),
         blinded_bidder_share_list: Vec::new(),
         phi: None,
     }));
+    
 
     let num_bidders = auction_params.num_bidders as usize;
 
@@ -262,13 +262,11 @@ pub async fn run_loop<
                 let bid_announcement = BidVectorAnnouncement {
                     public_key,
                     enc_bits: bid_vector.enc_bits.clone(),
-                    enc_bits_proofs: bid_vector.enc_bits_proofs.clone(),
                 };
 
                 auction_state
                     .bidders_bid_list
                     .push(bid_vector.enc_bits.clone());
-                auction_state.bidders_keys.push(public_key);
 
                 let envelope = create_envelope("BidAnnouncement", bid_announcement).unwrap();
                 let res = auction_channel
@@ -302,9 +300,10 @@ pub async fn run_loop<
                 }
             };
             if bidders_bid_list.len() == num_bidders {
+
                 let _ = events_tx.send(BidderEvent::Info("All bidders' bids have been received."));
                 let bidder_share = &bid_vector
-                    .compute_bidder_share(&bidders_bid_list.clone(), &bid_state.group_public_key);
+                    .compute_bidder_share(&bidders_bid_list.clone());
                 let bid_collation_announcement = BidShareAnnoucement {
                     public_key: public_key.clone(),
                     blinded_share: bidder_share.clone(),
@@ -342,6 +341,7 @@ pub async fn run_loop<
             }
             blinded_bidder_share_list.push(bid_collation_announcement.blinded_share);
             if blinded_bidder_share_list.len() == num_bidders {
+
                 let all_deltas = blinded_bidder_share_list
                     .iter()
                     .map(|sh| sh.delta.clone())
