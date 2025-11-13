@@ -1,4 +1,4 @@
-use std::cmp;
+use std::{cmp, collections::{BTreeMap, BTreeSet, HashSet}};
 
 use crate::elgamal::*;
 use crate::serde::projective_point;
@@ -6,6 +6,8 @@ use elastic_elgamal::{Ciphertext, PublicKey, RingProof, group::ElementOps};
 use k256::{ProjectivePoint, Scalar, elliptic_curve::{Field, Group, PrimeField}};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
+use crate::serde::projective_point::vec::serialize;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 
 const N_PRICES: u64 = 10; // K in many notations
 const WINNERS_M: u64 = 1; // M (usually 1 for single-w inner example)
@@ -31,29 +33,252 @@ impl Default for AuctionParams {
     }
 }
 
-pub type EncBidVector = Vec<Ciphertext<K256Group>>; // length = K
-pub type Gamma = Vec<ProjectivePoint>;
-pub type Delta = Vec<ProjectivePoint>;
-pub type Phi = Vec<ProjectivePoint>;
+#[derive(Clone, Serialize, Deserialize)]
+
+pub struct EncBidVector {
+    #[serde(with = "projective_point")]
+    public_key: ProjectivePoint,
+    encoded_bid: Vec<Ciphertext<K256Group>>,
+} // length = K
+
+impl PartialEq for  EncBidVector {
+    fn eq(&self, other: &Self) -> bool {
+        self.public_key
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes()
+            ==
+        other.public_key
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes()
+    }
+}
+
+impl Eq for EncBidVector {}
+
+impl Ord for EncBidVector {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        let a_ep = self
+            .public_key
+            .to_affine()
+            .to_encoded_point(true);
+        let b_ep = other
+            .public_key
+            .to_affine()
+            .to_encoded_point(true);
+        a_ep.as_bytes().cmp(b_ep.as_bytes())
+    }
+}
+
+impl PartialOrd for EncBidVector {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub type Phi = ProjectivePoint;
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct BidderShare {
+
+pub struct BidderPhiMatrix {
+    #[serde(with = "projective_point")]
+    public_key: ProjectivePoint,
+    pub inner: BTreeSet<BidderPhiRow>
+
+}
+
+impl PartialEq for  BidderPhiMatrix {
+    fn eq(&self, other: &Self) -> bool {
+        self.public_key
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes()
+            ==
+        other.public_key
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes()
+    }
+}
+
+impl Eq for BidderPhiMatrix {}
+
+impl Ord for BidderPhiMatrix {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        let a_ep = self
+            .public_key
+            .to_affine()
+            .to_encoded_point(true);
+        let b_ep = other
+            .public_key
+            .to_affine()
+            .to_encoded_point(true);
+        a_ep.as_bytes().cmp(b_ep.as_bytes())
+    }
+}
+
+impl PartialOrd for BidderPhiMatrix {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct  BidderPhiRow {
+     #[serde(with = "projective_point")]
+    pub public_key: ProjectivePoint,
+
+    #[serde(with = "projective_point::vec")]
+    pub phi_vector: Vec<Phi>,
+
+}
+
+
+
+impl PartialEq for  BidderPhiRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.public_key
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes()
+            ==
+        other.public_key
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes()
+    }
+}
+
+impl Eq for BidderPhiRow {}
+
+impl Ord for BidderPhiRow {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        let a_ep = self
+            .public_key
+            .to_affine()
+            .to_encoded_point(true);
+        let b_ep = other
+            .public_key
+            .to_affine()
+            .to_encoded_point(true);
+        a_ep.as_bytes().cmp(b_ep.as_bytes())
+    }
+}
+
+impl PartialOrd for BidderPhiRow {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub type Gamma = Vec<ProjectivePoint>;
+pub type Delta = Vec<ProjectivePoint>;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BidderShareRow {
+     #[serde(with = "projective_point")]
+    pub public_key: ProjectivePoint,
+
     #[serde(with = "projective_point::vec")]
     pub gamma: Gamma,
     #[serde(with = "projective_point::vec")]
     pub delta: Delta,
 }
 
+
+
+impl PartialEq for BidderShareRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.public_key
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes()
+            ==
+        other.public_key
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes()
+    }
+}
+
+impl Eq for BidderShareRow {}
+
+impl Ord for BidderShareRow {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        let a_ep = self
+            .public_key
+            .to_affine()
+            .to_encoded_point(true);
+        let b_ep = other
+            .public_key
+            .to_affine()
+            .to_encoded_point(true);
+        a_ep.as_bytes().cmp(b_ep.as_bytes())
+    }
+}
+
+impl PartialOrd for BidderShareRow {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct  BidderShareMatrix {
+    #[serde(with = "projective_point")]
+    public_key: ProjectivePoint,
+    rows: BTreeSet<BidderShareRow>,
+}  
+
+impl PartialEq for BidderShareMatrix {
+    fn eq(&self, other: &Self) -> bool {
+        self.public_key
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes()
+            ==
+        other.public_key
+            .to_affine()
+            .to_encoded_point(true)
+            .as_bytes()
+    }
+}
+
+impl Eq for BidderShareMatrix {}
+
+impl Ord for BidderShareMatrix {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        let a_ep = self
+            .public_key
+            .to_affine()
+            .to_encoded_point(true);
+        let b_ep = other
+            .public_key
+            .to_affine()
+            .to_encoded_point(true);
+        a_ep.as_bytes().cmp(b_ep.as_bytes())
+    }
+}
+
+impl PartialOrd for BidderShareMatrix {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+
+
+
 #[derive(Clone, Serialize, Deserialize)]
 /// A bidder’s unit-bid vector: encryptions of [0,...,0,1,0,...0]
 pub struct BidVector {
     pub secret_key: Scalar,
-    #[serde(with = "projective_point")]
-    pub public_key: ProjectivePoint,
     pub enc_bits: EncBidVector,                     // length = K
-    pub blinding_scalars: Vec<Scalar>,              // length = K
+    pub blinding_scalars: Vec<Vec<Scalar>>,              // length = K
     pub vector_size: usize,
     pub winner_size: usize,
+    pub bid_amount: u64,
 }
 
 /// Build an encrypted one-hot vector for price index j* (0..K-1)
@@ -68,7 +293,7 @@ pub fn make_onehot_bid<R: RngCore + CryptoRng>(
     let vector_size = auction_params.k as usize;
     let marker_projective = ProjectivePoint::GENERATOR * Scalar::from_u128(1024);
     let mut ciphertext_v = Vec::with_capacity(vector_size);
-    let mut blinding_scalars = Vec::with_capacity(vector_size);
+    let mut blinding_scalars = Vec::with_capacity(auction_params.num_bidders as usize);
     let bid_index = find_bid_index(bid_amount, auction_params).expect(format!("Bid amount out of range {}", bid_amount).as_str());
 
     println!("Bid amount {} mapped to index {}", bid_amount, bid_index);
@@ -80,15 +305,28 @@ pub fn make_onehot_bid<R: RngCore + CryptoRng>(
         };
         ciphertext_v.push(cipher_text);
 
-        blinding_scalars.push(Scalar::random(&mut rng));
     }
+
+    for _ in 0..auction_params.num_bidders {
+        let mut row_vec = Vec::with_capacity(vector_size);
+        for _ in 0..vector_size {
+            let blinder = Scalar::random(&mut rng);
+            row_vec.push(blinder);
+        }
+        blinding_scalars.push(row_vec);
+    }
+
+    let encoded_vec = EncBidVector {
+        public_key: public_key,
+        encoded_bid: ciphertext_v.clone(),
+    };
     BidVector {
         secret_key: secret_key,
-        public_key: public_key,
-        enc_bits: ciphertext_v,
+        enc_bits: encoded_vec,
         blinding_scalars,
         vector_size: vector_size,
         winner_size: auction_params.m as usize,
+        bid_amount,
     }
 }
 
@@ -96,12 +334,13 @@ impl BidVector {
     /// Step 6 : Compute γij for a participant for all i, j  and step 7
     pub fn compute_bidder_share(
         &self,
-        all_bids: &[EncBidVector],
-    ) -> BidderShare {
+        all_bids: BTreeSet<EncBidVector>,
+    ) -> BidderShareMatrix {
         let n_bidders = all_bids.len();
 
-        let mut gamma_vector = Vec::with_capacity(self.vector_size);
-        let mut delta_vector = Vec::with_capacity(self.vector_size);
+        let sorted_bids: Vec<EncBidVector> = all_bids.clone().into_iter().collect();
+
+        let mut blinded_share = BTreeSet::new();
 
         let two_m_plus_two = Scalar::from((2 * self.winner_size + 2) as u64);
         let two_m_plus_one = Scalar::from((2 * self.winner_size + 1) as u64);
@@ -110,96 +349,157 @@ impl BidVector {
         let marker_projective = ProjectivePoint::GENERATOR * Scalar::from_u128(1024);
         let bid_vector_finder = marker_projective * two_m_plus_one;
 
-        for j in 0..self.vector_size {
-            let mut acc_a = K256Group::identity();
-            let mut acc_b = K256Group::identity();
+        for (i, bid_v) in all_bids.iter().enumerate() {
 
-            let mut bid_vector_alpha_blinder = K256Group::identity();
-            let mut bid_vector_beta_blinder = K256Group::identity();
+            let bid = &bid_v.encoded_bid;
 
-            for d in 0..=j {
-                bid_vector_alpha_blinder =
-                    bid_vector_alpha_blinder + self.enc_bits[d].blinded_element();
-                bid_vector_beta_blinder = bid_vector_beta_blinder + self.enc_bits[d].random_element();
-            }
+            let mut gamma_vector = Vec::with_capacity(self.vector_size);
+            let mut delta_vector = Vec::with_capacity(self.vector_size);
 
-            bid_vector_alpha_blinder = bid_vector_alpha_blinder * two_m_plus_two;
-            bid_vector_beta_blinder = bid_vector_beta_blinder * two_m_plus_two;
+            for j in 0..self.vector_size {
+                let mut acc_a = K256Group::identity();
+                let mut acc_b = K256Group::identity();
 
-            for h in 0..n_bidders {
-                for d in j..self.vector_size {
-                    let d_plus_1 = all_bids[h].get(d + 1);
-                    if let Some(dp1) = d_plus_1 {
-                         acc_a = acc_a + all_bids[h][d].blinded_element() + dp1.blinded_element();
-                        acc_b = acc_b + all_bids[h][d].random_element() + dp1.random_element();
-                    } else {
-                        acc_a = acc_a + all_bids[h][d].blinded_element();
-                        acc_b = acc_b + all_bids[h][d].random_element();
-                    }
-               
+                let mut bid_vector_alpha_blinder = K256Group::identity();
+                let mut bid_vector_beta_blinder = K256Group::identity();
+
+                for d in 0..=j {
+                    bid_vector_alpha_blinder =
+                        bid_vector_alpha_blinder + bid[d].blinded_element();
+                    bid_vector_beta_blinder = bid_vector_beta_blinder + bid[d].random_element();
                 }
+
+                bid_vector_alpha_blinder = bid_vector_alpha_blinder * two_m_plus_two;
+                bid_vector_beta_blinder = bid_vector_beta_blinder * two_m_plus_two;
+
+                for h in 0..n_bidders {
+                    for d in j..self.vector_size {
+                        let d_plus_1 = sorted_bids[h].encoded_bid.get(d + 1);
+                        if let Some(dp1) = d_plus_1 {
+                             acc_a = acc_a + sorted_bids[h].encoded_bid[d].blinded_element() + dp1.blinded_element();
+                            acc_b = acc_b + sorted_bids[h].encoded_bid[d].random_element() + dp1.random_element();
+                        } else {
+                            acc_a = acc_a + sorted_bids[h].encoded_bid[d].blinded_element();
+                            acc_b = acc_b + sorted_bids[h].encoded_bid[d].random_element();
+                        }
+                    
+                    }
+                }
+
+                acc_a = (acc_a + bid_vector_alpha_blinder) - bid_vector_finder;
+                acc_b = acc_b + bid_vector_beta_blinder;
+
+                gamma_vector.push(acc_a);
+                delta_vector.push(acc_b);
             }
 
-            acc_a = (acc_a + bid_vector_alpha_blinder) - bid_vector_finder;
-            acc_b = acc_b + bid_vector_beta_blinder;
+            let mut gamma_blinded = Vec::with_capacity(self.vector_size);
+            let mut delta_blinded = Vec::with_capacity(self.vector_size);
 
-            gamma_vector.push(acc_a);
-            delta_vector.push(acc_b);
+            for j in 0..self.vector_size {
+                let gamma_j_blinded = &gamma_vector[j] * &self.blinding_scalars[i][j];
+                let delta_j_blinded = &delta_vector[j] * &self.blinding_scalars[i][j];
+
+                gamma_blinded.push(gamma_j_blinded);
+                delta_blinded.push(delta_j_blinded);
+            }
+
+            blinded_share.insert(BidderShareRow {
+                public_key: bid_v.public_key,
+                gamma: gamma_blinded,
+                delta: delta_blinded,
+            });
+
+
         }
 
-        let mut gamma_blinded = Vec::with_capacity(self.vector_size);
-        let mut delta_blinded = Vec::with_capacity(self.vector_size);
+       
 
-        for j in 0..self.vector_size {
-            let gamma_j_blinded = &gamma_vector[j] * &self.blinding_scalars[j];
-            let delta_j_blinded = &delta_vector[j] * &self.blinding_scalars[j];
 
-            gamma_blinded.push(gamma_j_blinded);
-            delta_blinded.push(delta_j_blinded);
-        }
-
-        BidderShare {
-            gamma: gamma_blinded,
-            delta: delta_blinded,
-        }
+        return BidderShareMatrix {
+            public_key: self.enc_bits.public_key,
+            rows: blinded_share,
+        };
     }
 
     // step 8 add partial secret keys to beta
     // TODO: Add proofs
-    pub fn derive_phi(&self, all_blinded_delta: &[Vec<ProjectivePoint>]) -> Phi {
-        let mut phi_v = Vec::with_capacity(self.vector_size);
+    pub fn derive_phi(&self, bidder_share: BTreeSet<BidderShareMatrix>) -> BidderPhiMatrix {
+        let all_deltas = bidder_share
+            .iter()
+            .map(|share| share.rows.clone().iter().map(|row| row.delta.clone()).collect::<Vec<Delta>>())
+            .collect::<Vec<Vec<Delta>>>();
 
-        for j in 0..self.vector_size {
-            let mut phi = K256Group::identity();
-            for h in 0..all_blinded_delta.len() {
-                phi = phi + (all_blinded_delta[h][j].clone());
-            }
+        let mut phi_rows= Vec::new();
 
-            phi_v.push(phi  * self.secret_key);
+        //row by row
+        for h in 0..all_deltas.len() {
+            let mut phi_row = Vec::new();
+           for j in 0..self.vector_size {
+                let mut phi = K256Group::identity();
+                for i in 0..all_deltas.len() {
+                    phi = phi + (all_deltas[i][h][j].clone());
+                }
+                phi_row.push(phi  * self.secret_key);
+           }
+           phi_rows.push(BidderPhiRow {
+                public_key: bidder_share.iter().nth(0).unwrap().rows.iter().nth(h).unwrap().public_key,
+                phi_vector: phi_row,
+           });
         }
+        
 
-        phi_v
+        BidderPhiMatrix {
+            public_key: self.enc_bits.public_key,
+            inner: phi_rows.into_iter().collect(),
+        }
     }
 
     // step 9 and 10, final decryption and winner determination
-    pub fn is_winner(&self, phi_list: &[Phi], gamma_all: &[Vec<ProjectivePoint>]) -> bool {
-        let n_bidders = phi_list.len();
-        let mut winning_vector = vec![K256Group::identity(); self.vector_size];
+   
+}
 
-        for j in 0..self.vector_size {
+pub fn derive_bidder_phi_matrix(
+    bidder_phi_list: Vec<BidderPhiMatrix>,
+    auction_params: &AuctionParams,
+    bidder_public_key: ProjectivePoint,
+) -> Vec<Vec<ProjectivePoint>> {
+    let n_bidders = bidder_phi_list.len();
+    let vector_size = auction_params.k as usize;
+
+    let mut winning_matrix: Vec<Vec<ProjectivePoint>> = vec![vec![K256Group::identity(); vector_size]; n_bidders];
+
+    for (i, bidder_phi) in bidder_phi_list.iter().enumerate() {
+        for phi_row in bidder_phi.inner.iter() {
+            if phi_row.public_key == bidder_public_key {
+                for j in 0..vector_size {
+                    winning_matrix[i][j] = phi_row.phi_vector[j].clone();
+                }
+            }
+        }
+    }
+
+    winning_matrix
+}
+
+ pub fn is_winner(phi_matrix: Vec<Vec<ProjectivePoint>>, gamma_matrix: Vec<Vec<ProjectivePoint>>) -> bool {
+        let n_bidders = phi_matrix.len();
+        let mut winning_vector: Vec<ProjectivePoint> = vec![K256Group::identity(); phi_matrix[0].len()];
+
+        for j in 0..phi_matrix[0].len() {
             let mut acc_gamma = K256Group::identity();
             let mut acc_phi = K256Group::identity();
 
             for h in 0..n_bidders {
-                acc_gamma = &acc_gamma + &gamma_all[h][j];
-                acc_phi = &acc_phi + &phi_list[h][j];
+                acc_gamma = &acc_gamma + &gamma_matrix[h][j];
+                acc_phi = &acc_phi + &phi_matrix[h][j];
             }
             let final_decryption = &acc_gamma - &acc_phi;
 
             winning_vector[j] = final_decryption;
         }
 
-        for j in 0..self.vector_size {
+        for j in 0..phi_matrix[0].len() {
             if winning_vector[j] == K256Group::identity() {
                 return true;
             }
@@ -207,6 +507,28 @@ impl BidVector {
 
         return false;
     }
+
+pub fn derive_bidder_gamma_matrix(
+    bidder_share_list: Vec<BidderShareMatrix>,
+    auction_params: &AuctionParams,
+    bidder_public_key: ProjectivePoint,
+) -> Vec<Vec<ProjectivePoint>> {
+    let n_bidders = bidder_share_list.len();
+    let vector_size = auction_params.k as usize;
+
+    let mut gamma_matrix: Vec<Vec<ProjectivePoint>> = vec![vec![K256Group::identity(); vector_size]; n_bidders];
+
+    for (i, bidder_share) in bidder_share_list.iter().enumerate() {
+        for share_row in bidder_share.rows.iter() {
+            if share_row.public_key == bidder_public_key {
+                for j in 0..vector_size {
+                    gamma_matrix[i][j] = share_row.gamma[j].clone();
+                }
+            }
+        }
+    }
+
+    gamma_matrix
 }
 
 pub fn find_bid_index(bid_amount: u64, auction_params: &AuctionParams) -> Option<usize> {
@@ -233,3 +555,109 @@ pub fn find_bid_index(bid_amount: u64, auction_params: &AuctionParams) -> Option
     }
     Some(idx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elgamal::K256Group;
+    use k256::{
+        ProjectivePoint, Scalar,
+        elliptic_curve::ops::MulByGenerator,
+    };
+    use rand::{rngs::StdRng, SeedableRng};
+
+    #[test]
+    fn linear_bidding_flow_selects_highest_bidder() {
+        let auction_params = AuctionParams {
+            k: 10,
+            min: 0,
+            max: 90,
+            m: 1,
+            num_bidders: 10,
+        };
+        let num_bidders = auction_params.num_bidders as usize;
+
+        let mut secret_keys = Vec::with_capacity(num_bidders);
+        let mut public_keys = Vec::with_capacity(num_bidders);
+        for idx in 0..num_bidders {
+            let mut key_rng = StdRng::seed_from_u64(1_000 + idx as u64);
+            let sk = Scalar::random(&mut key_rng);
+            let pk = ProjectivePoint::mul_by_generator(&sk);
+            secret_keys.push(sk);
+            public_keys.push(pk);
+        }
+
+        let aggregated_pk =
+            public_keys
+                .iter()
+                .fold(ProjectivePoint::IDENTITY, |acc, pk| acc + pk);
+        let group_pk = K256Group::to_public_key(&aggregated_pk);
+
+        let mut bid_vectors = Vec::with_capacity(num_bidders);
+        for idx in 0..num_bidders {
+            let mut bid_rng = StdRng::seed_from_u64(10_000 + idx as u64);
+            let bid_amount = (idx as u64) * 10;
+            let bid_vector = make_onehot_bid(
+                &mut bid_rng,
+                secret_keys[idx],
+                public_keys[idx],
+                &group_pk,
+                &auction_params,
+                bid_amount,
+            );
+            bid_vectors.push(bid_vector);
+        }
+
+        let enc_bid_vectors: BTreeSet<EncBidVector> = bid_vectors
+            .iter()
+            .map(|bv| bv.enc_bits.clone())
+            .collect();
+
+        let bidder_shares: BTreeSet<BidderShareMatrix> = bid_vectors
+            .iter()
+            .map(|bv| bv.compute_bidder_share(enc_bid_vectors.clone()))
+            .collect();
+
+        let phi_list: BTreeSet<BidderPhiMatrix> = bid_vectors
+            .iter()
+            .map(|bv| bv.derive_phi(bidder_shares.clone()))
+            .collect();
+
+        let users_sets: Vec<(ProjectivePoint, Vec<Vec<ProjectivePoint>>, Vec<Vec<ProjectivePoint>>)> = bid_vectors
+            .iter()
+            .map(|bv| {
+                let bidder_public_key = bv.enc_bits.public_key;
+                let phi_matrix = derive_bidder_phi_matrix(
+                    phi_list.clone().into_iter().collect(),
+                    &auction_params,
+                    bidder_public_key,
+                );
+                let gamma_matrix = derive_bidder_gamma_matrix(
+                    bidder_shares.clone().into_iter().collect(),
+                    &auction_params,
+                    bidder_public_key,
+                );
+                (bidder_public_key, phi_matrix, gamma_matrix)
+            })
+            .collect();
+
+        let winners: Vec<(ProjectivePoint, bool)> = users_sets.into_iter()
+            .map(|(pk, phi_matrix, gamma_matrix)| {
+                (pk,is_winner(phi_matrix, gamma_matrix))
+            })
+            .collect();
+
+
+        let winner_count = winners.iter().filter(|flag| flag.1).count();
+        assert_eq!(winner_count, 1, "there should be exactly one winner");
+
+        let winner = winners[0].0;
+        let wiiner_bid_amount = bid_vectors.iter().find(|bv| bv.enc_bits.public_key == winner).unwrap().bid_amount;
+        assert_eq!(wiiner_bid_amount, 0, "highest bidder should win");
+       
+
+      
+    }
+}
+
+

@@ -135,3 +135,55 @@ impl K256Group {
         PublicKey::from_bytes(bytes.as_ref()).unwrap()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use elastic_elgamal::SecretKey;
+    use k256::{
+        ProjectivePoint, Scalar,
+        elliptic_curve::{ops::MulByGenerator, Field},
+    };
+    use rand::{rngs::StdRng, SeedableRng};
+
+    #[test]
+    fn group_public_key_encrypts_and_decrypts_elements() {
+        let secret_scalars = [
+            Scalar::from(5u64),
+            Scalar::from(9u64),
+            Scalar::from(13u64),
+        ];
+        let public_points: Vec<ProjectivePoint> = secret_scalars
+            .iter()
+            .map(|sk| ProjectivePoint::mul_by_generator(sk))
+            .collect();
+
+        let aggregated_point =
+            public_points
+                .iter()
+                .fold(ProjectivePoint::IDENTITY, |acc, pk| acc + pk);
+        let group_public_key = K256Group::to_public_key(&aggregated_point);
+
+        let aggregated_secret = secret_scalars
+            .iter()
+            .copied()
+            .fold(Scalar::ZERO, |acc, sk| acc + sk);
+        assert_eq!(
+            aggregated_point,
+            ProjectivePoint::mul_by_generator(&aggregated_secret),
+            "group key should correspond to summed secret"
+        );
+
+        let mut rng = StdRng::seed_from_u64(7);
+        let message = ProjectivePoint::GENERATOR * Scalar::from(42u64);
+        let ciphertext = group_public_key.encrypt_element(message, &mut rng);
+
+
+        let decrypted = ciphertext.blinded_element().clone() - (ciphertext.random_element() * &aggregated_secret);
+        assert_eq!(
+            decrypted,
+            ProjectivePoint::GENERATOR * Scalar::from(42u64),
+            "group key should decrypt marker element"
+        );
+    }
+}
