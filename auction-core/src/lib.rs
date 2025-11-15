@@ -6,6 +6,7 @@ pub mod error;
 pub mod proof;
 pub mod seller;
 pub mod serde;
+pub mod types;
 
 // #[cfg(test)]
 // mod tests {
