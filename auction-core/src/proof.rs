@@ -178,6 +178,45 @@ pub fn prove_enc_bid<R: RngCore + CryptoRng>(
     }
 }
 
+/// Verify an OR-DLEQ proof used for ciphertext validity checks.
+pub fn verify_or_dleq(
+    g: &ProjectivePoint,
+    y_pub: &ProjectivePoint,
+    marker_y: &ProjectivePoint,
+    c1: &ProjectivePoint,
+    c2: &ProjectivePoint,
+    proof: &OrDleqProof,
+) -> bool {
+    let OrDleqProof {
+        t0_1,
+        t0_2,
+        t1_1,
+        t1_2,
+        c0,
+        c1: c1_branch,
+        s0,
+        s1,
+    } = proof;
+
+    let h1_0 = *c1;
+    let h2_0 = *c2;
+    let h1_1 = *c1;
+    let h2_1 = *c2 - *marker_y;
+
+    // Global challenge must equal c0 + c1 in the field.
+    let challenge = hash_to_scalar(&[*g, *y_pub, *marker_y, *c1, *c2, *t0_1, *t0_2, *t1_1, *t1_2]);
+    if (*c0 + *c1_branch) != challenge {
+        return false;
+    }
+
+    let branch0_ok =
+        (*g * *s0 == *t0_1 + (h1_0 * *c0)) && (*y_pub * *s0 == *t0_2 + (h2_0 * *c0));
+    let branch1_ok =
+        (*g * *s1 == *t1_1 + (h1_1 * *c1_branch)) && (*y_pub * *s1 == *t1_2 + (h2_1 * *c1_branch));
+
+    branch0_ok && branch1_ok
+}
+
 
 /// Hash a bunch of curve points into a scalar (Fiat–Shamir challenge).
 fn hash_to_scalar(points: &[ProjectivePoint]) -> Scalar {

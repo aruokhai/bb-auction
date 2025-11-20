@@ -9,7 +9,9 @@ use crate::serde::projective_point;
 use crate::serde::bid_share_column_vec;
 use crate::elgamal::*;
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Phi {
+    #[serde(with = "projective_point")]
     pub inner: ProjectivePoint,
     pub proof: DleqProof,
 }
@@ -119,7 +121,6 @@ pub struct  BidderPhiRow {
      #[serde(with = "projective_point")]
     pub public_key: ProjectivePoint,
 
-    #[serde(with = "projective_point::vec")]
     pub phi_vector: Vec<Phi>,
 
 }
@@ -263,5 +264,3 @@ impl PartialOrd for BidderShareMatrix {
         Some(self.cmp(other))
     }
 }
-
-
