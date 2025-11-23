@@ -42,6 +42,7 @@ pub struct Ciphertext {
     pub random_scalar: Scalar,
 }
 
+#[derive(Clone, Debug)]
 pub struct PublicKey{
     bytes: Vec<u8>,
     element: Element,

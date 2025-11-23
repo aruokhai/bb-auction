@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package auction;
+
+message SignedEnvelope {
+  // Raw serde_json-encoded MessageEnvelope bytes.
+  bytes envelope = 1;
+  // Schnorr (secp256k1) signature over `envelope`.
+  bytes signature = 2;
+  // Whether the seller should broadcast this message to all bidders.
+  bool broadcast = 3;
+  // X-only encoded public key of the signer.
+  bytes sender_public_key = 4;
+  // Optional identifier for observability.
+  string sender_id = 5;
+}
+
+message Ack {
+  bool ok = 1;
+  string error = 2;
+}
+
+message SubscribeRequest {
+  string bidder_id = 1;
+}
+
+service AuctionChannel {
+  // Bidder -> seller: publish a message (broadcast or direct).
+  rpc Publish(SignedEnvelope) returns (Ack);
+  // Seller -> bidder: long-lived stream of broadcast messages.
+  rpc Subscribe(SubscribeRequest) returns (stream SignedEnvelope);
+}

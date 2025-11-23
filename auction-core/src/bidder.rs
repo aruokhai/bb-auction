@@ -1,399 +1,275 @@
-// use std::{collections::{BTreeSet, HashSet}, sync::Arc};
+use std::{collections::{BTreeSet, HashSet}, iter::Once, sync::Arc};
 
-// use crate::{
-//     bidder, brandt::{AuctionParams, BidVector, BidderShare, EncBidVector, Phi, make_onehot_bid}, channel::{AuctionChannel, create_envelope}, elgamal::K256Group, error::AuctionError, proof::SecretKeyProof, seller::BidCollationFinalization, serde::projective_point
-// };
-// use elastic_elgamal::PublicKey;
-// use k256::{
-//     ProjectivePoint, Scalar,
-//     elliptic_curve::{Field, ops::MulByGenerator},
-// };
-// use rand::{CryptoRng, RngCore};
-// use serde::{Deserialize, Serialize};
-// use tokio::{
-//     sync::{Mutex, RwLock, mpsc},
-//     task,
-// };
+use crate::{
+    bidder, brandt::{
+        AuctionParams, BidVector, derive_bidder_gamma_matrix, derive_bidder_phi_matrix, is_winner, make_onehot_bid
+    }, channel::{AuctionChannel, GrpcBidderChannel, allowlist_from_keys, create_envelope}, elgamal::PublicKey, error::AuctionError, seller::BidCollationFinalization, serde::projective_point, types::{BidderPhiMatrix, BidderShareMatrix, EncBidVector}
+};
+use k256::{
+    ProjectivePoint, Scalar, SecretKey, elliptic_curve::{Field, ScalarPrimitive, ops::MulByGenerator, scalar}
+};
+use k256::schnorr::{SigningKey as SchnorrSigningKey, VerifyingKey as SchnorrVerifyingKey};
+use rand::{CryptoRng, Rng, RngCore};
+use serde::{Deserialize, Serialize};
+use tokio::{sync::{Mutex, RwLock, SetOnce, mpsc, oneshot, watch}, task};
 
-// #[derive(Clone, Serialize, Deserialize)]
-// pub struct BidKeyAnnouncement {
-//     #[serde(with = "projective_point")]
-//     pub public_key: ProjectivePoint,
-//     pub proof_of_knowledge: SecretKeyProof,
-// }
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BidKeyAnnouncement {
+    #[serde(with = "projective_point")]
+    pub public_key: ProjectivePoint,
+}
 
-// #[derive(Clone, Serialize, Deserialize)]
-// pub struct BidVectorAnnouncement {
-//     #[serde(with = "projective_point")]
-//     pub public_key: ProjectivePoint,
-//     pub enc_bits: EncBidVector, // length = K
-// }
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BidVectorAnnouncement {
+    #[serde(with = "projective_point")]
+    pub public_key: ProjectivePoint,
+    pub enc_bits: EncBidVector, // length = K
+}
 
-// #[derive(Clone, Serialize, Deserialize)]
-// pub struct BidPartialMessage {
-//     #[serde(with = "projective_point::vec")]
-//     pub phi: Phi,
-// }
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BidShareAnnouncement {
+    #[serde(with = "projective_point")]
+    pub public_key: ProjectivePoint,
+    pub blinded_share: BidderShareMatrix,
+}
 
-// #[derive(Clone, Serialize, Deserialize)]
-// pub struct BidShareAnnoucement {
-//     #[serde(with = "projective_point")]
-//     pub public_key: ProjectivePoint,
-//     pub blinded_share: BidderShare,
-// }
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BidPartialMessage {
+    pub phi_matrix: BidderPhiMatrix,
+}
 
-// /// Represents a bidder participating in the auction protocol.
-// pub struct Bidder<Channel: AuctionChannel + Clone> {
-//     secret_key: Scalar,
-//     public_key: ProjectivePoint,
-//     bid_state: Arc<Mutex<BidState>>,
-//     auction_params: AuctionParams,
-//     auction_channel: Channel,
-//     bidding_handler: Arc<Mutex<Option<task::JoinHandle<()>>>>,
-//     supervisor_handle: task::JoinHandle<()>,
-//     events_tx: BidderEventSender,
-//     events_rx: Mutex<Option<BidderEventReceiver>>,
-// }
+pub struct Bidder {
+    secret_key: Scalar,
+    public_key: ProjectivePoint,
+    auction_state: Arc<RwLock<BidState>>,
+    auction_channel: GrpcBidderChannel,
+    bidding_handler: task::JoinHandle<()>,
+    bid_tx: Option<oneshot::Sender<(AuctionParams, BidAmount)>>,
+    bid_state_rx: watch::Receiver<BidState>,
+}
 
-// pub struct AuctionState {
-//     bidders_keys: Vec<ProjectivePoint>,
-//     bidders_bid_list: Vec<EncBidVector>,
-//     blinded_bidder_share_list: Vec<BidderShare>,
-// }
 
-// pub struct BidState {
-//     pub group_public_key: PublicKey<K256Group>,
-//     pub bid_vector: Option<BidVector>,
-//     pub bid_status: BidStatus,
-//     pub bid_amount: u64,
-// }
+type GroupPubKey = PublicKey;
 
-// #[derive(Clone, PartialEq, PartialOrd)]
-// pub enum BidStatus {
-//     NotStarted,
-//     BidKeyAnnoucement,
-//     BidVectorAnnounced,
-//     BidShareAnnounced,
-//     BidPartialsSubmitted,
-//     Finished,
-// }
+#[derive(Clone)]
+pub enum BidState {
+    NotStarted,
+    BidKeyAnnounced(ProjectivePoint),
+    BidVectorAnnounced(GroupPubKey, BidVector),
+    BidShareAnnounced(BidderShareMatrix),
+    BidPartialsSubmitted(BidderPhiMatrix),
+    Finished(bool),
+}
 
-// #[derive(Debug, Clone, Copy)]
-// pub enum BidderEvent {
-//     Info(&'static str),
-//     Error(&'static str),
-//     IsWinner(bool),
-// }
+pub type BidAmount = u64;
 
-// pub type BidderEventSender = mpsc::UnboundedSender<BidderEvent>;
-// pub type BidderEventReceiver = mpsc::UnboundedReceiver<BidderEvent>;
+impl Bidder {
+    pub async fn new<R: RngCore + CryptoRng + Send + 'static>(
+        mut rng: R,
+        seller_endpoint: String,
+        
+    ) -> Self {
+        let secret_key = Scalar::random(&mut rng);
+        let public_key = ProjectivePoint::mul_by_generator(&secret_key);
 
-// impl<Channel: AuctionChannel + Clone + Send + 'static> Bidder<Channel> {
-//     pub fn new<R: RngCore + CryptoRng + Send + 'static>(
-//         mut rng: R,
-//         auction_channel: Channel,
-//         auction_params: AuctionParams,
-//     ) -> Self {
-//         let secret_key = Scalar::random(&mut rng);
-//         let public_key = ProjectivePoint::mul_by_generator(&secret_key);
+        let secret_key_bytes = secret_key.to_bytes();
+        let signing_key =
+            SchnorrSigningKey::from_bytes(&secret_key_bytes).expect("invalid secret key bytes");
+        let auction_channel = GrpcBidderChannel::connect(
+            seller_endpoint,
+            format!("{:?}", public_key),
+            signing_key,
+            HashSet::new(),
+        ).await.unwrap();
 
-//         let bid_state = Arc::new(Mutex::new(BidState {
-//             group_public_key: K256Group::to_public_key(&ProjectivePoint::GENERATOR),
-//             bid_vector: None,
-//             bid_status: BidStatus::NotStarted,
-//             bid_amount: 90,
-//         }));
+        let (bid_state_tx, _bid_state_rx) = watch::channel(BidState::NotStarted);
+        let (one_tx, one_rx) = oneshot::channel::<(AuctionParams, BidAmount)>();
 
-//         let (internal_events_tx, internal_events_rx) = mpsc::unbounded_channel();
-//         let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let channel = auction_channel.clone();
+        let runner_secret_key = secret_key.clone();
+        let runner_public_key = public_key.clone();
+        let bidding_handler = task::spawn(run(
+            rng,
+            channel,
+            runner_secret_key,
+            runner_public_key,
+            one_rx,
+            bid_state_tx,
+        ));
 
-//         // Clone values for the spawned task to avoid moving the originals.
-//         let bid_state_task = Arc::clone(&bid_state);
-//         let auction_channel_task = auction_channel.clone();
-//         let auction_params_task = auction_params.clone();
-//         let secret_key_task = secret_key.clone();
-//         let public_key_task = public_key.clone();
-//         let events_task_tx = internal_events_tx.clone();
+        Self {
+            secret_key,
+            public_key,
+            auction_channel,
+            auction_state: Arc::new(RwLock::new(BidState::NotStarted)),
+            bidding_handler,
+            bid_tx: Some(one_tx),
+            bid_state_rx: _bid_state_rx,
 
-//         let bidding_join_handle = tokio::spawn(async move {
-//             run_loop(
-//                 rng,
-//                 secret_key_task,
-//                 public_key_task,
-//                 bid_state_task,
-//                 auction_channel_task,
-//                 auction_params_task,
-//                 events_task_tx,
-//             )
-//             .await;
-//         });
-//         let bidding_handler = Arc::new(Mutex::new(Some(bidding_join_handle)));
+        }
+    }
 
-//         let supervisor_handle = spawn_bidder_supervisor(
-//             internal_events_rx,
-//             events_tx.clone(),
-//             bidding_handler.clone(),
-//         );
+    pub async fn initiate_bid(&mut self, params: AuctionParams, amount: BidAmount) {
+        let bid_one_shot = self.bid_tx.take();
+        bid_one_shot.unwrap().send((params, amount));
 
-//         Self {
-//             secret_key,
-//             public_key,
-//             bid_state,
-//             auction_params,
-//             auction_channel,
-//             bidding_handler,
-//             supervisor_handle,
-//             events_tx,
-//             events_rx: Mutex::new(Some(events_rx)),
-//         }
-//     }
+        let auction_state = self.auction_state.clone();
+        let bidder_state_rx = self.bid_state_rx.clone();
+        tokio::spawn(async move {
+            while bidder_state_rx.clone().changed().await.is_ok() {
+                let new_state = bidder_state_rx.borrow().clone();
+                let mut state_guard = auction_state.write().await;
+                *state_guard = new_state;
+            }
+        });
+  
+    }
 
-//     pub fn event_sender(&self) -> BidderEventSender {
-//         self.events_tx.clone()
-//     }
+    pub fn public_key(&self) -> ProjectivePoint {
+        self.public_key
+    }
+}
 
-//     pub async fn take_event_receiver(&self) -> Option<BidderEventReceiver> {
-//         self.events_rx.lock().await.take()
-//     }
-
-//     pub async fn initiaite_bidding<R: RngCore + CryptoRng>(
-//         &mut self,
-//         rng: &mut R,
-//         bid_amount: u64,
-//     ) -> Result<(), AuctionError> {
-//         let proof_of_knowledge = SecretKeyProof::new(&self.secret_key, &self.public_key, rng);
-
-//         let dkg_message = BidKeyAnnouncement {
-//             public_key: self.public_key,
-//             proof_of_knowledge,
-//         };
-//         let message_envelope = create_envelope("BidKeyAnnouncement", dkg_message).unwrap();
-//         self.auction_channel
-//             .send_broadcast_message(message_envelope)
-//             .await
-//             .map_err(|err| AuctionError::BroadcastError(err))?;
-
-//         let mut bid_state = self.bid_state.lock().await;
-//         bid_state.bid_amount = bid_amount;
-//         bid_state.bid_status = BidStatus::BidKeyAnnoucement;
-
-//         Ok(())
-//     }
-// }
-
-// fn spawn_bidder_supervisor(
-//     mut internal_events_rx: BidderEventReceiver,
-//     external_events_tx: BidderEventSender,
-//     bidding_handler: Arc<Mutex<Option<task::JoinHandle<()>>>>,
-// ) -> task::JoinHandle<()> {
-//     tokio::spawn(async move {
-//         while let Some(event) = internal_events_rx.recv().await {
-//             let _ = external_events_tx.send(event);
-
-//             if matches!(event, BidderEvent::Error(_)) {
-//                 if let Some(handle) = bidding_handler.lock().await.take() {
-//                     handle.abort();
-//                 }
-//                 let _ = external_events_tx.send(BidderEvent::Info("Bidding stopped due to error."));
-//                 break;
-//             }
-//         }
-//     })
-// }
+fn aggregate_public_key(keys: &[ProjectivePoint]) -> ProjectivePoint {
+    keys.iter()
+        .fold(ProjectivePoint::IDENTITY, |acc, pk| acc + pk)
+}
 
 
 
-// pub async fn run_loop<
-//     Channel: AuctionChannel + Clone + Send + 'static,
-//     R: RngCore + CryptoRng + Send + 'static,
-// >(
-//     mut rng: R,
-//     secret_key: Scalar,
-//     public_key: ProjectivePoint,
-//     bid_state: Arc<Mutex<BidState>>,
-//     auction_channel: Channel,
-//     auction_params: AuctionParams,
-//     events_tx: BidderEventSender,
-// ) {
+async fn run<R:RngCore + CryptoRng + Send>(
+    mut rng: R,
+    channel: GrpcBidderChannel,
+    secret_key: Scalar,
+    public_key: ProjectivePoint,
+    bid_details: oneshot::Receiver<(AuctionParams, BidAmount)>,
+    bid_state_tx: watch::Sender<BidState>,
+) {
     
-//     let auction_state = Arc::new(RwLock::new(AuctionState {
-//         bidders_keys: vec![public_key.clone()],
-//         bidders_bid_list:Vec::new(),
-//         blinded_bidder_share_list: Vec::new(),
-//     }));
+    let bidders_keys = Arc::new(Mutex::new(Vec::new()));
+    let bidders_bid_list = Arc::new(Mutex::new(BTreeSet::new()));
+    let bidder_share_list = Arc::new(Mutex::new(BTreeSet::new()));
+    let maybe_bid_vector: SetOnce<BidVector> =  SetOnce::const_new();
     
+    let (auction_params, bid_amount) = bid_details.await.unwrap();
 
-//     let num_bidders = auction_params.num_bidders as usize;
+    while let Ok(msg) = channel.receive_broadcast_message().await {
+        if let Ok(announcement) = msg.decode::<BidKeyAnnouncement>() {
+                let mut keys = bidders_keys.lock().await;
+                if !keys.iter().any(|pk| pk == &announcement.public_key) {
+                    keys.push(announcement.public_key);
+                }
+                // When all keys gathered, compute bid vector and announce it once.
+                if keys.len() as u64 == auction_params.num_bidders {
+                    let group_pk_point = aggregate_public_key(&keys);
+                    let group_pk = crate::elgamal::K256Group::to_public_key(&group_pk_point);
+                    let bid_vector = make_onehot_bid(
+                        &mut rng,
+                        secret_key,
+                        public_key,
+                        &group_pk,
+                        &auction_params,
+                        bid_amount,
+                    );
+                    let clone_enc = bid_vector.enc_bits.clone();
+                    let mut bids = bidders_bid_list.lock().await;
+                    bids.insert(clone_enc.clone());
 
-//     while let Ok(msg) = auction_channel.receive_broadcast_message().await {
-//         let mut auction_state = auction_state.write().await;
-//         let mut bid_state = bid_state.lock().await;
+                    let bid_env = create_envelope(
+                        "BidVectorAnnouncement",
+                        BidVectorAnnouncement {
+                            public_key: public_key,
+                            enc_bits: clone_enc,
+                        },
+                    )
+                    .map_err(|err| AuctionError::Other(err.to_string())).unwrap();
 
-//         if let Ok(dkg_announcement) = msg.decode::<BidKeyAnnouncement>() {
-//             let bidders_keys = &mut auction_state.bidders_keys;
-//             if bidders_keys.len() >= num_bidders {
-//                 let _ = events_tx.send(BidderEvent::Info("All bidders' keys have been received."));
-//                 continue;
-//             }
+                    channel
+                        .send_broadcast_message(bid_env)
+                        .await
+                        .map_err(|err| AuctionError::BroadcastError(err)).unwrap();
 
-//              if bidders_keys
-//                 .iter()
-//                 .any(|pk| pk == &dkg_announcement.public_key)
-//             {
-//                 println!("Duplicate public key received, ignoring.");
-//                 continue;
-//             }
-           
-//             bidders_keys.push(dkg_announcement.public_key);
-//             if bidders_keys.len() == num_bidders {
-//                 // Sum all public keys
-//                 let sum = bidders_keys
-//                     .iter()
-//                     .fold(ProjectivePoint::IDENTITY, |acc, pk| acc + pk);
-//                 let group_pk = K256Group::to_public_key(&sum);
-//                 bid_state.group_public_key = group_pk.clone();
+                    maybe_bid_vector.set(bid_vector.clone());
+                    bid_state_tx.send(BidState::BidVectorAnnounced(group_pk, bid_vector.clone())).unwrap();
+                }
+            }
 
-//                 let bid_vector = make_onehot_bid(
-//                     &mut rng,
-//                     secret_key,
-//                     public_key,
-//                     &group_pk,
-//                     &auction_params,
-//                     bid_state.bid_amount,
-//                 );
-//                 bid_state.bid_vector = Some(bid_vector.clone());
+            if let Ok(bid_message) = msg.decode::<BidVectorAnnouncement>() {
+                let mut bids = bidders_bid_list.lock().await;
+                bids.insert(bid_message.enc_bits);
 
-//                 let bid_announcement = BidVectorAnnouncement {
-//                     public_key,
-//                     enc_bits: bid_vector.enc_bits.clone(),
-//                 };
+                if bids.len() as u64 == auction_params.num_bidders {
+                    let bid_vector = maybe_bid_vector.wait().await;
+                    let shares = bid_vector.compute_bidder_share(&mut rng, bids.clone()).unwrap();
+                    let mut share_set = bidder_share_list.lock().await;
+                    share_set.insert(shares.clone());
 
-//                 auction_state
-//                     .bidders_bid_list
-//                     .push(bid_vector.enc_bits.clone());
+                    let share_env = create_envelope(
+                        "BidShareAnnouncement",
+                        BidShareAnnouncement {
+                            public_key: public_key,
+                            blinded_share: shares.clone(),
+                        },
+                    )
+                    .map_err(|err| AuctionError::Other(err.to_string())).unwrap();
 
-//                 let envelope = create_envelope("BidAnnouncement", bid_announcement).unwrap();
-//                 let res = auction_channel
-//                     .send_broadcast_message(envelope)
-//                     .await
-//                     .map_err(|err| AuctionError::BidPublishErr(err));
-//                 if !res.is_ok() {
-//                     let _ =
-//                         events_tx.send(BidderEvent::Error("Bid announcement broadcast failed."));
-//                     continue;
-//                 }
+                    channel
+                        .send_broadcast_message(share_env)
+                        .await
+                        .map_err(|err| AuctionError::BroadcastError(err)).unwrap();
 
-//                 bid_state.bid_status = BidStatus::BidVectorAnnounced;
-//             }
-//         }
-//         if let Ok(bid_announcement) = msg.decode::<BidVectorAnnouncement>() {
-//             let bidders_bid_list = &mut auction_state.bidders_bid_list;
+                    bid_state_tx.send(BidState::BidShareAnnounced(shares)).unwrap();
+                }
+            }
 
-//             if bidders_bid_list.len() >= num_bidders {
-//                 let _ = events_tx.send(BidderEvent::Info("All bidders' bids have been received."));
-//                 continue;
-//             }
+            if let Ok(share_message) = msg.decode::<BidShareAnnouncement>() {
+                let mut share_set = bidder_share_list.lock().await;
+                share_set.insert(share_message.blinded_share);
 
-//             if bid_announcement.public_key == public_key {
-//                 println!("Ignoring own bid announcement.");
-//                 continue;
-//             }
+                if share_set.len() as u64 == auction_params.num_bidders  {
 
-//             bidders_bid_list.push(bid_announcement.enc_bits);
-            
-//             if bidders_bid_list.len() == num_bidders {
+                    let bids = bidders_bid_list.lock().await;
+                    let bid_vector = maybe_bid_vector.wait().await;
+                    let phi = bid_vector.derive_phi(&mut rng, share_set.clone(), bids.clone());
 
-//                 let bid_vector = match &bid_state.bid_vector {
-//                     Some(bv) => bv,
-//                     None => {
-//                         let _ = events_tx.send(BidderEvent::Error(
-//                             "Bid vector not set yet while handling bid announcement.",
-//                         ));
-//                         continue;
-//                     }
-//                  };
+                    let phi_env = create_envelope(
+                        "BidPartialMessage",
+                        BidPartialMessage { phi_matrix: phi.clone() },
+                    )
+                    .map_err(|err| AuctionError::Other(err.to_string())).unwrap();
 
-//                 let _ = events_tx.send(BidderEvent::Info("All bidders' bids have been received."));
-//                 let bidder_share = &bid_vector
-//                     .compute_bidder_share(&bidders_bid_list.clone());
-//                 let bid_collation_announcement = BidShareAnnoucement {
-//                     public_key: public_key.clone(),
-//                     blinded_share: bidder_share.clone(),
-//                 };
-//                 let envelope =
-//                     create_envelope("BidCollationAnnouncement", bid_collation_announcement)
-//                         .unwrap();
-//                 let res = auction_channel.send_broadcast_message(envelope).await;
-//                 if !res.is_ok() {
-//                     let _ = events_tx.send(BidderEvent::Error("Bid collation broadcast failed."));
-//                     continue;
-//                 }
-//                 bid_state.bid_status = BidStatus::BidShareAnnounced;
-//                 auction_state
-//                     .blinded_bidder_share_list
-//                     .push(bidder_share.clone());
-//             }
-//         }
-//         if let Ok(bid_collation_announcement) = msg.decode::<BidShareAnnoucement>() {
-//             let blinded_bidder_share_list = &mut auction_state.blinded_bidder_share_list;
+                    channel
+                        .send_direct_message(phi_env)
+                        .await
+                        .map_err(|err| AuctionError::BroadcastError(err)).unwrap();
 
-//             if bid_collation_announcement.public_key == public_key {
-//                 println!("Ignoring own bid collation announcement.");
-//                 continue;
-//             }
-//             let bid_vector = match &bid_state.bid_vector {
-//                 Some(bv) => bv,
-//                 None => {
-//                     let _ = events_tx.send(BidderEvent::Error(
-//                         "Bid vector not set yet while handling bid collation announcement.",
-//                     ));
-//                     continue;
-//                 }
-//             };
-//             if blinded_bidder_share_list.len() >= num_bidders {
-//                 let _ = events_tx.send(BidderEvent::Info(
-//                     "All bidders' bid collations have been received.",
-//                 ));
-//                 continue;
-//             }
-//             blinded_bidder_share_list.push(bid_collation_announcement.blinded_share);
-//             if blinded_bidder_share_list.len() == num_bidders {
+                    bid_state_tx.send(BidState::BidPartialsSubmitted(phi)).unwrap()
 
-//                 let all_deltas = blinded_bidder_share_list
-//                     .iter()
-//                     .map(|sh| sh.delta.clone())
-//                     .collect::<Vec<_>>();
-//                 let phi = &bid_vector.derive_phi(&all_deltas);
-//                 let phi_message = BidPartialMessage { phi: phi.clone() };
-//                 let envelope = create_envelope("PhiMessage", phi_message).unwrap();
-//                 let res = auction_channel.send_direct_message(envelope).await;
-//                 if !res.is_ok() {
-//                     let _ = events_tx.send(BidderEvent::Error("Direct phi message failed."));
-//                     continue;
-//                 }
-//                 bid_state.bid_status = BidStatus::BidPartialsSubmitted
-//             }
-//         }
-//         if let Ok(bid_collation_finalization) = msg.decode::<BidCollationFinalization>() {
-//             let blinded_bidder_share_list = &mut auction_state.blinded_bidder_share_list;
-//             let bid_vector = match &bid_state.bid_vector {
-//                 Some(bv) => bv,
-//                 None => {
-//                     let _ = events_tx.send(BidderEvent::Error(
-//                         "Bid vector not set yet while handling bid collation finalization.",
-//                     ));
-//                     continue;
-//                 }
-//             };
-//             let gamma_list: Vec<Vec<ProjectivePoint>> = blinded_bidder_share_list
-//                 .iter()
-//                 .map(|sh| sh.gamma.clone())
-//                 .collect::<Vec<_>>();
-//             let phi_list = bid_collation_finalization.collated_phi;
-//             let is_winner = bid_vector.is_winner(&phi_list, &gamma_list);
+                }
+            } 
 
-//             println!("am i a winner {}", is_winner);
-//             let _ = events_tx.send(BidderEvent::IsWinner(is_winner));
-//         }
-//     }
-// }
+            if let Ok(finalization) = msg.decode::<BidCollationFinalization>() {
+                // Compute winner flag.
+                let bidder_gamma_matrix = derive_bidder_gamma_matrix(
+                    bidder_share_list.lock().await.clone().into_iter().collect(),
+                    &auction_params,
+                    public_key,
+                );
+                for winner_phi in finalization.collated_phi.iter() {
+                    if winner_phi.public_key != public_key {
+                        continue;
+                    }
+                    let winner_bool =  is_winner(&winner_phi.matrix, bidder_gamma_matrix) ;
+                    bid_state_tx.send(BidState::Finished(winner_bool)).unwrap();
+                    break;
+                }
+                bid_state_tx.send(BidState::Finished(false)).unwrap();
+                break;
+
+                
+            }
+    }
+
+}
+
+

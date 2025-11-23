@@ -412,7 +412,7 @@ pub fn derive_bidder_phi_matrix(
     winning_matrix
 }
 
- pub fn is_winner(phi_matrix: Vec<Vec<ProjectivePoint>>, gamma_matrix: Vec<Vec<ProjectivePoint>>) -> bool {
+ pub fn is_winner(phi_matrix: &Vec<Vec<ProjectivePoint>>, gamma_matrix: Vec<Vec<ProjectivePoint>>) -> bool {
         let n_bidders = phi_matrix.len();
         let mut winning_vector: Vec<ProjectivePoint> = vec![K256Group::identity(); phi_matrix[0].len()];
 
@@ -651,7 +651,7 @@ mod tests {
 
         let winners: Vec<(ProjectivePoint, bool)> = users_sets.into_iter()
             .map(|(pk, phi_matrix, gamma_matrix)| {
-                (pk,is_winner(phi_matrix, gamma_matrix))
+                (pk,is_winner(&phi_matrix, gamma_matrix))
             })
             .collect();
 
