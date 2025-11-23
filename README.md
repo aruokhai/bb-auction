@@ -1,11 +1,21 @@
 ## Fully Private Auctions in a Constant Number of Rounds
 
-This workspace contains an implementation of the bidder–resolved uniform-price
-auction protocol proposed by Felix Brandt in the **“Fully Private Auctions in a
-Constant Number of Rounds”** paper (FC 2003, revised Feb. 2004 – see
-`fc2003.pdf`). The protocol allows a group of bidders to run a second-price
-(`M + 1`-st price) auction end-to-end without auctioneers or other trusted
-third-parties while keeping every losing bid private.
+This workspace implements a bidder–resolved uniform-price auction (Brandt, FC
+2003, see `fc2003.pdf`) and shows how it can drive Arkade’s per-batch fee
+discovery (`FeeDiscovery.pdf`).
+
+### What you can do with this repo
+
+- Run **fully private M+1 auctions** where losers stay hidden and only the
+  clearing price is revealed.
+- **Model Arkade batch fees**: derive a clearing rate `ρ_t` for K-radix batch
+  liquidity, paying all winners the `(M + 1)`-st bid while keeping bids private.
+- **Verify proofs end-to-end**: OR-DLEQ/DLEQ PoKs, homomorphic ElGamal
+  operations, γ/Φ masking, and distributed decryptions are all checked in tests.
+- **Prototype networking**: gRPC channel scaffolding for bidders/sellers is
+  present for wiring real transports.
+- **Extend the protocol**: tie/rollover handling, “seller-only price revelation,”
+  and efficiency tweaks are highlighted for further work.
 
 ### Highlights from FC2003
 
@@ -24,6 +34,28 @@ third-parties while keeping every losing bid private.
 The `fc2003.pdf` included in the repository contains the full explanation,
 security proofs, and optimization notes (e.g., handling ties and efficiency
 variants).
+
+### Arkade batch liquidity fee discovery (proposal)
+
+`FeeDiscovery.pdf` sketches how this codebase underpins Arkade’s per-batch fee
+rate auction:
+
+- **Batch economics:** Each batch needs `M · k` liquidity units; `M` cheapest
+  providers win and all are paid the `(M + 1)`-st bid (`ρ_t`), keeping bidders
+  truthful and the operator neutral.
+- **Privacy + verifiability:** Bids are encrypted one-hot vectors; MPC over
+  homomorphic ElGamal with ZK proofs yields only `ρ_t` and the winning keys.
+  Losing bids and ordering remain hidden, but correctness is publicly
+  auditable from the transcript.
+- **Threat model:** Up to `n − 1` bidders and the operator may collude; fairness
+  is enforced via bidder-resolved computation plus proof-checked partial
+  decryptions.
+- **Tie/rollover handling:** Ties at the marginal rate are admitted as
+  conditionally winning capacity; surplus liquidity rolls into future batches
+  without leaking tie structure, preserving temporal independence across rounds.
+- **Outcome:** Arkade publishes `ρ_t`, winners hold proofs binding them to lock
+  liquidity for the batch, and only winners’ identities are revealed to the
+  operator for coordination.
 
 ## Crate layout
 
@@ -48,8 +80,6 @@ The top-level `Cargo.toml` defines a workspace with the `auction-core` crate.
 Requirements:
 
 - Rust toolchain (edition 2024 features are enabled),
-- `pkg-config`/`openssl` as needed by `k256` (on Linux),
-- `pdftotext` only if you plan to regenerate excerpts from `fc2003.pdf`.
 
 Typical developer loop:
 
@@ -63,14 +93,6 @@ The `brandt::tests::linear_bidding_flow_selects_highest_bidder` unit test is a
 useful sanity-check: it synthesizes multiple bidders, encrypts bids, verifies all
 DLEQ/OR-DLEQ proofs, derives γ/Φ matrices, and checks a single winner emerges.
 
-## Protocol walkthrough (code vs. paper)
-
-| Paper reference            | Code hook                          | Notes |
-|---------------------------|------------------------------------|-------|
-| Section 4 (bidder-resolved auctions) | `brandt::make_onehot_bid` | Builds one-hot encrypted bid vectors \(b_i\) using group-wide ElGamal PK. |
-| Section 5 (protocol description) | `brandt::BidVector::compute_bidder_share` | Reproduces the linear algebra on encrypted vectors ((2L−I), down shift, masking) using group operations. |
-| Section 5.1 (ElGamal instantiation) | `elgamal.rs` & `proof.rs` | Implements the homomorphic encryption, Fiat–Shamir challenges, and ZK proof machinery. |
-| Section 5.2 (ties) | TODO                                    | Tie-breaking logic from the paper is not yet wired into the crate. |
 
 ## Running your own experiments
 
