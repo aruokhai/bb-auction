@@ -1,6 +1,6 @@
 use std::{cmp, collections::{BTreeMap, BTreeSet, HashSet}};
 
-use crate::{elgamal::*, error::AuctionError, proof::{PlainCase, prove_dleq, prove_enc_bid, verify_dleq, verify_or_dleq}, types::*};
+use crate::{elgamal::*, error::AuctionError, proof::{PlainCase, prove_dleq, prove_enc_bid, verify_dleq, verify_or_dleq}, rate::{self, RateParams}, types::*};
 use crate::serde::projective_point;
 use k256::{ProjectivePoint, Scalar, elliptic_curve::{Field, Group, PrimeField}};
 use rand::{CryptoRng, RngCore};
@@ -17,9 +17,7 @@ fn marker_point() -> ProjectivePoint {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AuctionParams {
-    pub k: u64, // K in many notations
-    pub min: u64,
-    pub max: u64,
+    pub rate: RateParams,
     pub m: u64, // M (usually 1 for single-winner example)
     pub num_bidders: u64,
 }
@@ -27,10 +25,12 @@ pub struct AuctionParams {
 impl Default for AuctionParams {
     fn default() -> Self {
         Self {
-            k: N_PRICES,
+            rate: RateParams {
+                min_bps: 100,  // 1.00%
+                max_bps: 1000, // 10.00%
+                step_bps: 1,   // 1 bp
+            },
             m: WINNERS_M,
-            min: 0,
-            max: 100,
             num_bidders: 2,
         }
     }
@@ -58,14 +58,14 @@ pub fn make_onehot_bid<R: RngCore + CryptoRng>(
     public_key: ProjectivePoint,
     group_pk: &PublicKey,
     auction_params: &AuctionParams,
-    bid_amount: u64,
+    rate_bps: u64,
 ) -> BidVector {
-    let vector_size = auction_params.k as usize;
+    let vector_size = auction_params.rate.total_slots();
     let marker_projective = marker_point();
     let group_pk_element = group_pk.as_element();
     let mut ciphertext_v = Vec::with_capacity(vector_size);
     let mut blinding_scalars = Vec::with_capacity(auction_params.num_bidders as usize);
-    let bid_index = find_bid_index(bid_amount, auction_params).expect(format!("Bid amount out of range {}", bid_amount).as_str());
+    let bid_index = auction_params.rate.find_rate_index(rate_bps).expect(format!("Bid amount out of range {}", rate_bps).as_str());
 
     for j in 0..vector_size {
         let cipher_text = if j == bid_index {
@@ -130,7 +130,7 @@ pub fn make_onehot_bid<R: RngCore + CryptoRng>(
         blinding_scalars,
         vector_size: vector_size,
         winner_size: auction_params.m as usize,
-        bid_amount,
+        bid_amount: rate_bps,
     }
 }
 
@@ -375,7 +375,7 @@ pub fn derive_bidder_phi_matrix(
     bidder_share_list: Vec<BidderShareMatrix>,
 ) -> Vec<Vec<ProjectivePoint>> {
     let n_bidders = bidder_phi_list.len();
-    let vector_size = auction_params.k as usize;
+    let vector_size = auction_params.rate.total_slots();
 
     let aggregated_deltas  =  get_all_deltas(bidder_share_list, auction_params);
 
@@ -444,7 +444,7 @@ pub fn derive_bidder_gamma_matrix(
     bidder_public_key: ProjectivePoint,
 ) -> Vec<Vec<ProjectivePoint>> {
     let n_bidders = bidder_share_list.len();
-    let vector_size = auction_params.k as usize;
+    let vector_size = auction_params.rate.total_slots() as usize;
 
     let mut gamma_matrix: Vec<Vec<ProjectivePoint>> = vec![vec![K256Group::identity(); vector_size]; n_bidders];
 
@@ -461,37 +461,12 @@ pub fn derive_bidder_gamma_matrix(
     gamma_matrix
 }
 
-pub fn find_bid_index(bid_amount: u64, auction_params: &AuctionParams) -> Option<usize> {
-    let min = auction_params.min;
-    let slot_width = auction_params.k;
-    let max = auction_params.max;
-
-    if slot_width == 0 {
-        return None;
-    }
-    if bid_amount < min || bid_amount > max {
-        return None;
-    }
-
-    // total number of slots (inclusive range)
-    let total_slots = ((max - min) / slot_width) as usize  + 1;
-
-    // reverse index: high bids map to low indices
-    let diff = max - bid_amount;
-    let idx = (diff / slot_width) as usize;
-    if idx >= total_slots {
-       
-        return None;
-    }
-    Some(idx)
-}
-
 fn get_all_deltas(
     bidder_share_list: Vec<BidderShareMatrix>,
     auction_params: &AuctionParams,
 ) -> Vec<Vec<ProjectivePoint>> {
     let n_bidders = bidder_share_list.len();
-    let vector_size = auction_params.k as usize;
+    let vector_size = auction_params.rate.total_slots() as usize;
 
     let all_deltas = bidder_share_list
             .iter()
@@ -557,6 +532,9 @@ fn verify_bid_vector(
     Ok(())
 }
 
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,9 +548,11 @@ mod tests {
     #[test]
     fn linear_bidding_flow_selects_highest_bidder() {
         let auction_params = AuctionParams {
-            k: 10,
-            min: 0,
-            max: 90,
+            rate: rate::RateParams {
+                min_bps: 100,
+                max_bps: 1000,
+                step_bps: 100,
+            },
             m: 1,
             num_bidders: 10,
         };
@@ -597,14 +577,20 @@ mod tests {
         let mut bid_vectors = Vec::with_capacity(num_bidders);
         for idx in 0..num_bidders {
             let mut bid_rng = StdRng::seed_from_u64(10_000 + idx as u64);
-            let bid_amount = (idx as u64) * 10;
+            let rate_bps =
+            auction_params.rate.min_bps + (idx as u64) * auction_params.rate.step_bps;
+            assert!(
+                rate_bps >= auction_params.rate.min_bps
+                    && rate_bps <= auction_params.rate.max_bps
+            );
+
             let bid_vector = make_onehot_bid(
                 &mut bid_rng,
                 secret_keys[idx],
                 public_keys[idx],
                 &group_pk,
                 &auction_params,
-                bid_amount,
+                rate_bps,
             );
             bid_vectors.push(bid_vector);
         }
@@ -660,8 +646,11 @@ mod tests {
         assert_eq!(winner_count, 1, "there should be exactly one winner");
 
         let winner = winners[0].0;
-        let wiiner_bid_amount = bid_vectors.iter().find(|bv| bv.enc_bits.public_key == winner).unwrap().bid_amount;
-        assert_eq!(wiiner_bid_amount, 0, "highest bidder should win");
+        let wiiner_rate_bps = bid_vectors.iter().find(|bv| bv.enc_bits.public_key == winner).unwrap().bid_amount;
+         assert_eq!(
+        wiiner_rate_bps, auction_params.rate.min_bps,
+        "bidder with lowest interest rate should win"
+    );
        
 
     }

@@ -7,6 +7,7 @@ pub mod proof;
 pub mod seller;
 pub mod serde;
 pub mod types;
+pub mod rate;
 
 // #[cfg(test)]
 // mod tests {
