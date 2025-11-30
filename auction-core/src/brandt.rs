@@ -369,18 +369,18 @@ impl BidVector {
 }
 
 pub fn derive_bidder_phi_matrix(
-    bidder_phi_list: Vec<BidderPhiMatrix>,
+    bidders_phi_list: Vec<BidderPhiMatrix>,
     auction_params: &AuctionParams,
     bidder_public_key: ProjectivePoint,
     bidder_share_list: Vec<BidderShareMatrix>,
 ) -> Vec<Vec<ProjectivePoint>> {
-    let n_bidders = bidder_phi_list.len();
+    let n_bidders = bidders_phi_list.len();
     let vector_size = auction_params.rate.total_slots();
 
     let aggregated_deltas  =  get_all_deltas(bidder_share_list, auction_params);
 
     // Verify proofs
-    for bidder_phi in &bidder_phi_list {
+    for bidder_phi in &bidders_phi_list {
         let phi_creator_pk = bidder_phi.public_key;
         for (i, row) in bidder_phi.inner.iter().enumerate() {
             for (j, phi)in row.phi_vector.iter().enumerate() {
@@ -399,7 +399,7 @@ pub fn derive_bidder_phi_matrix(
 
     let mut winning_matrix: Vec<Vec<ProjectivePoint>> = vec![vec![K256Group::identity(); vector_size]; n_bidders];
 
-    for (i, bidder_phi) in bidder_phi_list.iter().enumerate() {
+    for (i, bidder_phi) in bidders_phi_list.iter().enumerate() {
         for phi_row in bidder_phi.inner.iter() {
             if phi_row.public_key == bidder_public_key {
                 for j in 0..vector_size {

@@ -111,6 +111,7 @@ pub trait AuctionChannel {
     -> Result<(), AuctionChannelErorr>;
     async fn send_direct_message(&self, msg: MessageEnvelope) -> Result<(), AuctionChannelErorr>;
     async fn receive_broadcast_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr>;
+    async fn receive_direct_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr>;
 }
 
 #[derive(Debug)]
@@ -283,9 +284,24 @@ impl proto::auction_channel_server::AuctionChannel for AuctionGrpcService {
 /// envelopes to all connected bidders.
 pub struct GrpcSellerChannel {
     signing_key: SigningKey,
-    direct_rx: Mutex<mpsc::UnboundedReceiver<MessageEnvelope>>,
+    direct_rx: Arc<Mutex<mpsc::UnboundedReceiver<MessageEnvelope>>>,
+    broadcast_rx: Arc<Mutex<broadcast::Receiver<proto::SignedEnvelope>>>,
     broadcast_tx: broadcast::Sender<proto::SignedEnvelope>,
-    _server_handle: JoinHandle<()>,
+    allowed_signers: HashSet<Vec<u8>>,
+    _server_handle: Arc<JoinHandle<()>>,
+}
+
+impl Clone for GrpcSellerChannel {
+    fn clone(&self) -> Self {
+        Self {
+            signing_key: self.signing_key.clone(),
+            direct_rx: self.direct_rx.clone(),
+            broadcast_rx: Arc::new(Mutex::new(self.broadcast_tx.subscribe())),
+            broadcast_tx: self.broadcast_tx.clone(),
+            allowed_signers: self.allowed_signers.clone(),
+            _server_handle: self._server_handle.clone(),
+        }
+    }
 }
 
 impl GrpcSellerChannel {
@@ -297,7 +313,7 @@ impl GrpcSellerChannel {
         let allowed = allowed_signers.into();
 
         let (direct_tx, direct_rx) = mpsc::unbounded_channel();
-        let (broadcast_tx, _) = broadcast::channel(256);
+        let (broadcast_tx, broadcast_rx) = broadcast::channel(256);
 
         let service = AuctionGrpcService {
             allowed_signers: allowed.clone(),
@@ -319,10 +335,19 @@ impl GrpcSellerChannel {
 
         Ok(Self {
             signing_key,
-            direct_rx: Mutex::new(direct_rx),
+            direct_rx: Arc::new(Mutex::new(direct_rx)),
+            broadcast_rx: Arc::new(Mutex::new(broadcast_rx)),
             broadcast_tx,
-            _server_handle: handle,
+            allowed_signers: allowed,
+            _server_handle: Arc::new(handle),
         })
+    }
+
+    pub async fn receive_direct_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr> {
+        let mut rx = self.direct_rx.lock().await;
+        rx.recv()
+            .await
+            .ok_or_else(|| AuctionChannelErorr::FailedToReceive("direct channel closed".into()))
     }
 }
 
@@ -346,9 +371,20 @@ impl AuctionChannel for GrpcSellerChannel {
     }
 
     async fn receive_broadcast_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr> {
-        Err(AuctionChannelErorr::FailedToReceive(
-            "seller channel does not listen for broadcast messages".into(),
-        ))
+        loop {
+            let mut rx = self.broadcast_rx.lock().await;
+            match rx.recv().await {
+                Ok(signed) => {
+                    break decode_signed_envelope(&signed, &self.allowed_signers);
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(err) => break Err(AuctionChannelErorr::FailedToReceive(err.to_string())),
+            }
+        }
+    }
+
+    async fn receive_direct_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr> {
+        GrpcSellerChannel::receive_direct_message(self).await
     }
 }
 
@@ -487,6 +523,12 @@ impl AuctionChannel for GrpcBidderChannel {
             .await
             .ok_or_else(|| AuctionChannelErorr::FailedToReceive("broadcast stream ended".into()))
     }
+
+    async fn receive_direct_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr> {
+        Err(AuctionChannelErorr::FailedToReceive(
+            "bidder channel does not expose direct inbox".into(),
+        ))
+    }
 }
 
 // /// Receives the next envelope from the provided receiver.
@@ -520,7 +562,7 @@ pub mod test_utils {
 
     impl InMemoryAuctionChannel {
         pub fn new() -> Self {
-            let (broadcast_tx, broadcast_rx) = broadcast::channel(64);
+            let (broadcast_tx, broadcast_rx) = broadcast::channel(256);
             let (direct_tx, direct_rx) = mpsc::unbounded_channel();
 
             Self {
@@ -568,10 +610,21 @@ pub mod test_utils {
 
 
         async fn receive_broadcast_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr> {
-            let mut rx = self.broadcast_rx.lock().await;
+            loop {
+                let mut rx = self.broadcast_rx.lock().await;
+                match rx.recv().await {
+                    Ok(msg) => break Ok(msg),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(err) => break Err(AuctionChannelErorr::FailedToReceive(err.to_string())),
+                }
+            }
+        }
+
+        async fn receive_direct_message(&self) -> Result<MessageEnvelope, AuctionChannelErorr> {
+            let mut rx = self.inner.direct_rx.lock().await;
             rx.recv()
                 .await
-                .map_err(|err| AuctionChannelErorr::FailedToReceive(err.to_string()))
+                .ok_or_else(|| AuctionChannelErorr::FailedToReceive("direct channel closed".into()))
         }
     }
 }

@@ -39,12 +39,11 @@ pub struct BidPartialMessage {
 }
 
 pub struct Bidder {
-    secret_key: Scalar,
     public_key: ProjectivePoint,
     auction_state: Arc<RwLock<BidState>>,
     auction_channel: GrpcBidderChannel,
     bidding_handler: task::JoinHandle<()>,
-    bid_tx: Option<oneshot::Sender<(AuctionParams, BidAmount)>>,
+    bid_tx: Option<oneshot::Sender<(AuctionParams, BidRate)>>,
     bid_state_rx: watch::Receiver<BidState>,
 }
 
@@ -61,7 +60,7 @@ pub enum BidState {
     Finished(bool),
 }
 
-pub type BidAmount = u64;
+pub type BidRate = u64;
 
 impl Bidder {
     pub async fn new<R: RngCore + CryptoRng + Send + 'static>(
@@ -83,7 +82,7 @@ impl Bidder {
         ).await.unwrap();
 
         let (bid_state_tx, _bid_state_rx) = watch::channel(BidState::NotStarted);
-        let (one_tx, one_rx) = oneshot::channel::<(AuctionParams, BidAmount)>();
+        let (one_tx, one_rx) = oneshot::channel::<(AuctionParams, BidRate)>();
 
         let channel = auction_channel.clone();
         let runner_secret_key = secret_key.clone();
@@ -98,7 +97,6 @@ impl Bidder {
         ));
 
         Self {
-            secret_key,
             public_key,
             auction_channel,
             auction_state: Arc::new(RwLock::new(BidState::NotStarted)),
@@ -109,9 +107,9 @@ impl Bidder {
         }
     }
 
-    pub async fn initiate_bid(&mut self, params: AuctionParams, amount: BidAmount) {
+    pub async fn initiate_bid(&mut self, params: AuctionParams, amount: BidRate) {
         let bid_one_shot = self.bid_tx.take();
-        bid_one_shot.unwrap().send((params, amount));
+        let _ = bid_one_shot.unwrap().send((params, amount));
 
         let auction_state = self.auction_state.clone();
         let bidder_state_rx = self.bid_state_rx.clone();
@@ -121,12 +119,45 @@ impl Bidder {
                 let mut state_guard = auction_state.write().await;
                 *state_guard = new_state;
             }
-        });
+        }); 
   
     }
 
     pub fn public_key(&self) -> ProjectivePoint {
         self.public_key
+    }
+
+    pub async fn announce_public_key(&self) -> Result<(), AuctionError> {
+        let bid_env = create_envelope(
+            "BidKeyAnnouncement",
+            BidKeyAnnouncement {
+                public_key: self.public_key,
+            },
+        )
+        .map_err(|err| AuctionError::Other(err.to_string()))?;
+
+        self.auction_channel
+            .send_broadcast_message(bid_env)
+            .await
+            .map_err(AuctionError::BroadcastError)
+    }
+
+    pub async fn wait_for_final_outcome(&self) -> bool {
+        let mut bidder_state_rx = self.bid_state_rx.clone();
+
+        loop {
+            if let BidState::Finished(is_winner) = bidder_state_rx.borrow().clone() {
+                return is_winner;
+            }
+
+            if bidder_state_rx.changed().await.is_err() {
+                if let BidState::Finished(is_winner) = bidder_state_rx.borrow().clone() {
+                    return is_winner;
+                }
+
+                panic!("bidder state channel closed before reaching final outcome");
+            }
+        }
     }
 }
 
@@ -137,14 +168,18 @@ fn aggregate_public_key(keys: &[ProjectivePoint]) -> ProjectivePoint {
 
 
 
-async fn run<R:RngCore + CryptoRng + Send>(
+async fn run<R, C>(
     mut rng: R,
-    channel: GrpcBidderChannel,
+    channel: C,
     secret_key: Scalar,
     public_key: ProjectivePoint,
-    bid_details: oneshot::Receiver<(AuctionParams, BidAmount)>,
+    bid_details: oneshot::Receiver<(AuctionParams, BidRate)>,
     bid_state_tx: watch::Sender<BidState>,
-) {
+) 
+where
+    R: RngCore + CryptoRng + Send,
+    C: AuctionChannel + Clone + Send + Sync + 'static,
+{
     
     let bidders_keys = Arc::new(Mutex::new(Vec::new()));
     let bidders_bid_list = Arc::new(Mutex::new(BTreeSet::new()));
@@ -189,8 +224,8 @@ async fn run<R:RngCore + CryptoRng + Send>(
                         .await
                         .map_err(|err| AuctionError::BroadcastError(err)).unwrap();
 
-                    maybe_bid_vector.set(bid_vector.clone());
-                    bid_state_tx.send(BidState::BidVectorAnnounced(group_pk, bid_vector.clone())).unwrap();
+                    let _ = maybe_bid_vector.set(bid_vector.clone());
+                    let _ = bid_state_tx.send(BidState::BidVectorAnnounced(group_pk, bid_vector.clone()));
                 }
             }
 
@@ -218,7 +253,7 @@ async fn run<R:RngCore + CryptoRng + Send>(
                         .await
                         .map_err(|err| AuctionError::BroadcastError(err)).unwrap();
 
-                    bid_state_tx.send(BidState::BidShareAnnounced(shares)).unwrap();
+                    let _ = bid_state_tx.send(BidState::BidShareAnnounced(shares));
                 }
             }
 
@@ -243,7 +278,7 @@ async fn run<R:RngCore + CryptoRng + Send>(
                         .await
                         .map_err(|err| AuctionError::BroadcastError(err)).unwrap();
 
-                    bid_state_tx.send(BidState::BidPartialsSubmitted(phi)).unwrap()
+                    let _ = bid_state_tx.send(BidState::BidPartialsSubmitted(phi));
 
                 }
             } 
@@ -255,15 +290,19 @@ async fn run<R:RngCore + CryptoRng + Send>(
                     &auction_params,
                     public_key,
                 );
+                let mut emitted_final = false;
                 for winner_phi in finalization.collated_phi.iter() {
                     if winner_phi.public_key != public_key {
                         continue;
                     }
-                    let winner_bool =  is_winner(&winner_phi.matrix, bidder_gamma_matrix) ;
-                    bid_state_tx.send(BidState::Finished(winner_bool)).unwrap();
+                    let winner_bool =  is_winner(&winner_phi.matrix, bidder_gamma_matrix.clone()) ;
+                    let _ = bid_state_tx.send(BidState::Finished(winner_bool));
+                    emitted_final = true;
                     break;
                 }
-                bid_state_tx.send(BidState::Finished(false)).unwrap();
+                if !emitted_final {
+                    let _ = bid_state_tx.send(BidState::Finished(false));
+                }
                 break;
 
                 
@@ -271,5 +310,3 @@ async fn run<R:RngCore + CryptoRng + Send>(
     }
 
 }
-
-
